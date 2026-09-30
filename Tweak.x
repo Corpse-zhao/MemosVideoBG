@@ -293,20 +293,6 @@ static void MVBApplyMainPage(UIViewController *vc) {
     }
 }
 
-// 延迟补挂首页背景 —— 有些页面 viewWillAppear 时视图层级还没搭好,
-// 等 0.45 秒窗口就绪后再试一次。
-static void MVBScheduleMainPageCheck(UIViewController *vc) {
-    __weak UIViewController *wvc = vc;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        @try {
-            UIViewController *s = wvc;
-            if (!s || !s.isViewLoaded || !s.view.window) return;
-            MVBApplyMainPage(s);
-        } @catch (NSException *e) {}
-    });
-}
-
 // Darwin 通知回调: 控制App 改了配置 -> 实时让所有视频背景视图重新 configure。
 // (CFNotificationCenterAddObserver 要求一个 C 函数指针, 不能直接传消息表达式)
 static void MVBPrefsChanged(CFNotificationCenterRef center, void *observer,
