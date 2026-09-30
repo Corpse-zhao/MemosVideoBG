@@ -1,6 +1,6 @@
 Package: com.nvb.memosvideobg
 Name: 备忘录视频背景
-Version: 1.1.0
+Version: 1.2.0
 Architecture: iphoneos-arm64
 Description: 给苹果「备忘录」App 的各个界面挂视频背景 (首页/文件夹/笔记/搜索一下/最近删除/多多创新等), 每个界面可独立开关与调节透明度/模糊/音量
 Maintainer: 板栗仁

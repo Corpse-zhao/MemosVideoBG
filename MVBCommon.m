@@ -660,9 +660,21 @@ BOOL MVBDirWritablePath(NSString *dir) {
     } @catch (NSException *e) {}
 }
 
+// v1.2.0: 界面开关默认「开」。
+// 此前默认关 + 总开关默认开 —— 于是刚装上的用户看到的是「总开关开着、七个界面开关全关」，
+// 只有他手动勾过的那一两个界面生效，其余界面「怎么点都没反应」，用户反馈就是
+// 「只有首页生效，其他界面全都不生效」。语义改为: 总开关是总闸, 界面开关是「单独关掉
+// 某个界面」的开关 —— 没配置过 = 跟随总开关 (开); 用户手动关过的会被记住 (值已落盘)。
 - (BOOL)isEnabledForContext:(NSString *)ctx {
+    if (!ctx.length) return NO;
+    // 兜底语境 n_all: 跟随「七类界面」里是否有任意一个开着 (它自己没有开关)
+    if ([ctx isEqualToString:MVBContextAll]) {
+        for (NSArray<NSString *> *def in MVBContextDefinitions())
+            if ([self isEnabledForContext:def[0]]) return YES;
+        return NO;
+    }
     id v = [self configValueForKey:[ctx stringByAppendingString:@"_enabled"]];
-    return v ? [v boolValue] : NO; // 默认关
+    return v ? [v boolValue] : YES; // v1.2.0: 默认开 (总开关才是总闸)
 }
 
 - (void)setEnabled:(BOOL)on forContext:(NSString *)ctx {
@@ -780,20 +792,36 @@ BOOL MVBDirWritablePath(NSString *dir) {
 }
 
 // 各根素材计数摘要 (横幅 / 诊断共用)
+// v1.2.0: 修诊断误导 —— 以前数的是 <根>/<界面名>/ 子目录里的条目数。
+// 但 v10.4.0 起素材已「摊平」到根目录 (界面子目录只剩历史遗留), 于是横幅永远显示
+// 「素材=0」, 用户以为素材没读到, 排查全被带偏 (真机截图实锤)。
+// 现在: 主数字 = 根目录下的视频文件数 (真正被读取的那批), 另外单列旧子目录残留。
 - (NSString *)rootsSummaryForContext:(NSString *)ctx {
+    (void)ctx;   // v1.2.0: 不再按界面子目录统计 (素材已摊平到根目录), 参数保留兼容调用点
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *movieExts = @[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"];
     NSInteger idx = 0;
     for (NSString *root in MVBRootCandidates()) {
         idx++;
         BOOL ex = [fm fileExistsAtPath:root];
-        NSArray *items = ex ? [fm contentsOfDirectoryAtPath:[root stringByAppendingPathComponent:ctx ?: MVBContextAll]
-                                                      error:nil] : nil;
+        NSArray *raw = ex ? [fm contentsOfDirectoryAtPath:root error:nil] : nil;
         NSUInteger n = 0;
-        for (NSString *f in items) if (![f hasPrefix:@"."] && ![f hasPrefix:@"_"]) n++;
-        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 素材=%lu\n", (long)idx,
+        for (NSString *f in raw)
+            if ([movieExts containsObject:f.pathExtension.lowercaseString]) n++;
+        [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 视频=%lu", (long)idx,
             MVBRootLabel(root), ex ? @"是" : @"否",
             [fm isReadableFileAtPath:root] ? @"是" : @"否", (unsigned long)n];
+        // 旧版界面子目录若还没摊平, 点出来 (启动时会自动搬进根目录)
+        NSUInteger legacy = 0;
+        for (NSArray<NSString *> *def in MVBContextDefinitions()) {
+            NSArray *sub = [fm contentsOfDirectoryAtPath:
+                [root stringByAppendingPathComponent:def[0]] error:nil];
+            for (NSString *f in sub)
+                if (![f hasPrefix:@"."]) legacy++;
+        }
+        if (legacy) [s appendFormat:@" (旧子目录残留 %lu 项, 启动会自动合并)", (unsigned long)legacy];
+        [s appendString:@"\n"];
     }
     return s;
 }
@@ -831,6 +859,21 @@ BOOL MVBDirWritablePath(NSString *dir) {
     [s appendFormat:@"界面[%@] 开关=%@ 素材=%@ 生效=%@\n",
         ctx ?: MVBContextAll, on ? @"开" : @"关", has ? @"有" : @"无",
         (on && has) ? @"是✓" : @"否✗"];
+    // v1.2.0: 七个界面开关一览 —— 一张截图就能分清「是开关没开」还是「清底没生效」
+    @try {
+        NSArray<NSString *> *shortNames = @[@"首页", @"文件夹", @"笔记", @"搜索", @"最近", @"新建", @"内部"];
+        NSArray<NSArray<NSString *> *> *defs = MVBContextDefinitions();
+        NSMutableString *sw = [NSMutableString string];
+        for (NSUInteger i = 0; i < defs.count; i++) {
+            NSString *label = (i < shortNames.count) ? shortNames[i] : defs[i][0];
+            [sw appendFormat:@"%@%@%@", i ? @" " : @"", label,
+                [self isEnabledForContext:defs[i][0]] ? @"✓" : @"✗"];
+        }
+        [s appendFormat:@"开关 %@\n", sw];
+    } @catch (NSException *e) {}
+    // v1.2.0: 打出当前页真实类名 —— 一眼看出「这个页面到底被认成谁」
+    if (self.lastVCClass.length)
+        [s appendFormat:@"当前页类名 %@\n", self.lastVCClass];
     [s appendString:@"（点本横幅可隐藏；控制App 里可关闭）"];
     return s;
 }
@@ -1377,6 +1420,13 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 
         // v1.7.19: 记录该 VC 实际请求挂载的语境 (无论开关与否), 离开时按它精确暂停
         objc_setAssociatedObject(vc, &MVBAppliedCtxKey, ctx, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // v1.2.0: 记录「当前界面」与当前页 VC 类名。
+        //   - chrome 钩子 (UICollectionViewListCell / 分区装饰视图) 按它判断该不该清扫
+        //     —— 此前清扫绑死在首页开关上, 其它界面永远不清, 被白底盖住 = 「不生效」
+        //   - 诊断横幅也按它显示真实界面名 (此前被 %ctor 定时器刷成兜底 n_all, 误导排查)
+        self.currentContext = ctx;
+        self.lastVCClass = NSStringFromClass([vc class]);
 
         // v1.9.0: 授权门禁 —— 所有挂背景的路径都汇聚到这里, 未激活/过期一律不挂
         // (这样无论从哪个钩子进来都拦得住, 不需要在 Tweak.x 各处补判断)

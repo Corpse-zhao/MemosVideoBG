@@ -47,21 +47,66 @@ static BOOL MVBShouldProcess(void) {
 //   ICSearchViewController / ICNoteSearchViewController  搜索一下
 //   ICRecentlyDeletedNote... / 含 RecentlyDeleted  最近删除
 //   ICFolderCreationController / ICFolderAndNoteCreation... 多多创新 (新建)
-static NSString *MVBContextForClassName(NSString *name) {
-    if (!name || name.length < 2) return nil;
+// v1.2.0: 系统类名判定 —— 这些一律不碰 (按「原始类名」判, 不受 Swift 前缀影响)
+static BOOL MVBIsSystemClassName(NSString *name) {
+    if (!name.length) return YES;
+    return [name hasPrefix:@"UI"] || [name hasPrefix:@"_UI"] ||
+           [name hasPrefix:@"NS"] || [name hasPrefix:@"WK"] ||
+           [name hasPrefix:@"SF"] || [name hasPrefix:@"CA"] ||
+           [name hasPrefix:@"MF"] || [name hasPrefix:@"MK"] ||
+           [name hasPrefix:@"SK"] || [name hasPrefix:@"PK"];
+}
+
+// v1.2.0: Swift 类名规范化。
+// 备忘录有些控制器是 Swift 类, 运行时类名是 mangled 形式, 形如
+//   "_TtC8NotesUI24ICNoteEditorViewController"    (_TtC <模块名长度><模块名> <类名长度><类名>)
+// 旧代码见到 "_TtC" 前缀直接丢弃 -> 这些页面认不出语境 -> 整页毫无反应。
+// 这里把 mangled 前缀剥掉, 还原成 "ICNoteEditorViewController" 再参与关键词判别。
+static NSString *MVBNormalizedClassName(NSString *name) {
+    if (![name hasPrefix:@"_TtC"]) return name;
+    NSUInteger i = 4;                       // 跳过 "_TtC"
+    NSUInteger len = 0;
+    while (i < name.length) {               // 模块名长度
+        unichar c = [name characterAtIndex:i];
+        if (c < '0' || c > '9') break;
+        len = len * 10 + (NSUInteger)(c - '0');
+        i++;
+    }
+    i += len;                               // 跳过模块名
+    NSUInteger clsLen = 0;
+    while (i < name.length) {               // 类名长度
+        unichar c = [name characterAtIndex:i];
+        if (c < '0' || c > '9') break;
+        clsLen = clsLen * 10 + (NSUInteger)(c - '0');
+        i++;
+    }
+    if (clsLen && i + clsLen <= name.length)
+        return [name substringWithRange:NSMakeRange(i, clsLen)];
+    return name;                            // 格式不符, 原样返回 (关键词匹配仍可命中)
+}
+
+static NSString *MVBContextForClassName(NSString *rawName) {
+    if (!rawName || rawName.length < 2) return nil;
+    NSString *name = MVBNormalizedClassName(rawName);
     // 排除系统基类与前缀噪声
-    if ([name hasPrefix:@"UI"] || [name hasPrefix:@"_UI"] ||
-        [name hasPrefix:@"NS"]  || [name hasPrefix:@"WK"]  ||
-        [name hasPrefix:@"SF"]  || [name hasPrefix:@"_TtC"]) return nil;
+    if (MVBIsSystemClassName(rawName)) return nil;
+    // Swift 类按剥壳后的名字再判一次系统前缀 (避免 _TtC 后面跟着 UI 系类)
+    if (MVBIsSystemClassName(name)) return nil;
 
     // 排除键盘 / 选择器 / 输入 / 附件相关 (避免污染)
     if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"] ||
         [name containsString:@"Input"]    || [name containsString:@"Compose"] ||
         [name containsString:@"Contact"]  || [name containsString:@"Activity"] ||
-        [name containsString:@"Attachment"]) return nil;
+        [name containsString:@"Attachment"] ||
+        [name containsString:@"Alert"]    || [name containsString:@"Popover"] ||
+        [name containsString:@"Sheet"]) return nil;
 
     // 只处理备忘录自家类 (IC* / Notes*)，其它一律不碰
-    if (![name hasPrefix:@"IC"] && ![name hasPrefix:@"Notes"]) return nil;
+    // v1.2.0: 补上 Swift mangled 名 (模块名可能是 NotesUI / NotesEditor / NotesShared)
+    BOOL notesish = [name hasPrefix:@"IC"] || [name hasPrefix:@"Notes"] ||
+                    [rawName containsString:@"NotesUI"] || [rawName containsString:@"NotesEditor"] ||
+                    [rawName containsString:@"NotesShared"] || [rawName containsString:@"MobileNotes"];
+    if (!notesish) return nil;
 
     // ① 最近删除 (优先级最高 —— 类名里含 RecentlyDeleted 的都在这里)
     if ([name containsString:@"RecentlyDeleted"]) return MVBContextRecent;
@@ -87,6 +132,10 @@ static NSString *MVBContextForClassName(NSString *name) {
     if ([name containsString:@"Folder"] ||
         [name containsString:@"NoteList"] ||
         [name containsString:@"NotesList"]) return MVBContextFolder;
+
+    // ⑥b v1.2.0: 笔记列表在部分系统版本上叫 *Browse* (ICNoteBrowseViewController 之类)
+    if ([name containsString:@"Browse"]) return MVBContextFolder;
+
 
     // ⑦ 其它内部子页面 (设置/更多/账户/附件等)
     if ([name containsString:@"Settings"] || [name containsString:@"Account"] ||
@@ -117,6 +166,18 @@ static BOOL MVBViewHasAnyTitle(UIViewController *vc, NSArray<NSString *> *titles
     NSUInteger hits = 0;
     MVBScanForTitles(vc.view, 0, &hits, titles);
     return hits >= 1;
+}
+
+// v1.2.0: 视图子树里是否含有「列表/滚动容器」。
+// 备忘录真正的内容页 (文件夹内笔记列表 / 最近删除 / 搜索) 里, vc.view 往往是
+// 普通容器, 真正的 UICollectionView 是子视图 —— 用它来判断「这页值不值得挂背景」。
+static BOOL MVBViewHostsScrollable(UIView *v, NSInteger depth) {
+    if (!v || depth > 5) return NO;
+    if ([v isKindOfClass:[UITableView class]] ||
+        [v isKindOfClass:[UICollectionView class]]) return YES;
+    for (UIView *s in v.subviews)
+        if (MVBViewHostsScrollable(s, depth + 1)) return YES;
+    return NO;
 }
 
 // 备忘录页面语境判别: 先看导航标题 (最可靠), 再看类名兜底。
@@ -232,16 +293,26 @@ static void MVBRestoreHiddenCards(void) {
     [MVBHiddenCards removeAllObjects];
 }
 
-static BOOL MVBMainSweepActive(void) {
+// v1.2.0: 清扫按「当前界面自己的开关」判定。
+// 此前绑死在首页开关上 (m.masterEnabled && isEnabledForContext:Home), 而
+// MVBClearContainerBGs 又只在首页路径被调用 —— 于是文件夹/笔记/最近删除等界面
+// 虽然挂上了视频, 却被页面自身的白底整片盖住, 用户看到的就是「只有首页生效」。
+static BOOL MVBSweepActiveForContext(NSString *ctx) {
     if (!MVBIsLicensed()) return NO;   // v1.9.0: 未授权不做任何清扫
+    if (!ctx.length) return NO;
     MVBManager *m = [MVBManager shared];
-    return m.masterEnabled && [m isEnabledForContext:MVBContextHome];
+    return m.masterEnabled && [m isEnabledForContext:ctx];
 }
 
-static void MVBClearContainerBGs(UIView *v, NSInteger depth) {
+// 供「拿不到 VC 上下文」的 chrome 钩子使用: 取最近一次应用的界面
+static BOOL MVBMainSweepActive(void) {
+    return MVBSweepActiveForContext([[MVBManager shared] currentContext]);
+}
+
+static void MVBClearContainerBGs(UIView *v, NSInteger depth, NSString *ctx, BOOL hideCards) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[MVBVideoBackgroundView class]]) return;
-    if (!MVBMainSweepActive()) { MVBRestoreHiddenCards(); return; }
+    if (!MVBSweepActiveForContext(ctx)) { MVBRestoreHiddenCards(); return; }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -266,19 +337,36 @@ static void MVBClearContainerBGs(UIView *v, NSInteger depth) {
             v.layer.backgroundColor = NULL;
     }
     // v1.7.20: 大面积无内容的白卡/模糊卡/背景图 -> 整体藏掉 (文字图标小控件不动)
-    if (MVBIsBigCard(v)) MVBRecordHideCard(v);
+    // v1.2.0: 「藏大白卡」只在首页启用 —— 那是首页分组卡片的专用对策,
+    //         在笔记正文/文件夹等页面误伤风险高, 这些页面只做底色透明化。
+    if (hideCards && MVBIsBigCard(v)) MVBRecordHideCard(v);
     for (UIView *s in v.subviews) {
         if (s == cellBg || s == cellSelBg) continue;   // 托管背景子树不碰
-        MVBClearContainerBGs(s, depth + 1);
+        MVBClearContainerBGs(s, depth + 1, ctx, hideCards);
     }
 }
 
-// 主页面挂背景 + 清扫 + 延迟补扫 (cell 滚动复用/系统重设底色后再清)
-static void MVBApplyMainPage(UIViewController *vc) {
-    [[MVBManager shared] applyToViewController:vc context:MVBContextHome];
-    MVBClearContainerBGs(vc.view, 0);
-    MVBRefreshBanner(MVBContextHome);
+// v1.2.0: 清扫入口 (带节流)。
+// 同一页面出现时, 兜底 hook 与显式 hook 会各调一次 MVBApplyPage, 再加上 3 段延迟补扫
+// —— 整树遍历 4~6 遍没必要。这里 0.12s 内只真正扫一次, 剩下的交给后面的补扫兜住。
+static CFAbsoluteTime sMVBLastSweepAt = 0;
+static void MVBSweepPage(UIView *v, NSString *ctx, BOOL hideCards) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (sMVBLastSweepAt > 0 && now - sMVBLastSweepAt < 0.12) return;
+    sMVBLastSweepAt = now;
+    MVBClearContainerBGs(v, 0, ctx, hideCards);
+}
+
+// v1.2.0: 任意界面都挂背景 + 清扫 + 延迟补扫。
+// 此前只有首页做清扫 (MVBApplyMainPage), 其它界面只挂背景 -> 被白底盖住 = 「不生效」。
+// hideCards (藏大面积白卡) 仍只在首页开启。
+static void MVBApplyPage(UIViewController *vc, NSString *ctx) {
+    [[MVBManager shared] applyToViewController:vc context:ctx];
+    BOOL hideCards = [ctx isEqualToString:MVBContextHome];
+    MVBSweepPage(vc.view, ctx, hideCards);
+    MVBRefreshBanner(ctx);
     __weak UIViewController *wvc = vc;
+    NSString *ctxCopy = [ctx copy];
     NSTimeInterval delays[3] = {0.45, 1.2, 2.5};
     for (int i = 0; i < 3; i++) {
         NSTimeInterval t = delays[i];
@@ -287,7 +375,7 @@ static void MVBApplyMainPage(UIViewController *vc) {
             @try {
                 UIViewController *s = wvc;
                 if (!s || !s.isViewLoaded || !s.view.window) return;
-                MVBClearContainerBGs(s.view, 0);
+                MVBSweepPage(s.view, ctxCopy, hideCards);
             } @catch (NSException *e) {}
         });
     }
@@ -313,18 +401,13 @@ static void MVBPrefsChanged(CFNotificationCenterRef center, void *observer,
 @interface ICFolderCreationController : UIViewController @end        // 新建文件夹 (多多创新)
 
 #define MVB_NOTES_GUARD() if (!MVBIsNotesProcess()) return;
-#define MVB_SAFE_APPLY(ctx) @try { \
-    [[MVBManager shared] applyToViewController:self context:(ctx)]; \
-    MVBRefreshBanner(ctx); \
-} @catch (NSException *e) {}
+// v1.2.0: 所有界面统一走 MVBApplyPage (挂背景 + 清扫 + 延迟补扫)。
+// 此前只有首页走清扫路径, 其它界面只挂背景 -> 被页面白底盖住 = 「只有首页生效」。
+// (宏展开发生在使用处, 所以这里引用下面定义的 MVB_APPLY_CTX 是安全的)
+#define MVB_SAFE_APPLY(ctx) MVB_APPLY_CTX(self, ctx)
 
-// v1.7.19: 主页面语境走 MVBApplyMainPage (挂背景+容器清扫+补扫), 其它语境照旧。
-// 此前只有 Filter 兜底分支做清扫, 显式钩子 (退回主页面时走这条) 只铺背景不清扫,
-// 导致「退回来又变白」。
 #define MVB_APPLY_CTX(vc, c) @try { \
-    if ([c isEqualToString:MVBContextHome]) MVBApplyMainPage(vc); \
-    else [[MVBManager shared] applyToViewController:(vc) context:(c)]; \
-    MVBRefreshBanner(c); \
+    MVBApplyPage((vc), (c)); \
 } @catch (NSException *e) {}
 
 // v1.7.21: 白色一律在「赋色源头」拦, 不做任何 layout 中途改动 (v1.7.20 的
@@ -440,7 +523,7 @@ static char MVBDetectedCtxKey;
         @try {
             __strong typeof(wself) sself = wself;
             if (!sself || !sself.isViewLoaded || !sself.view.window) return;
-            MVBClearContainerBGs(sself.view, 0);
+            MVBSweepPage(sself.view, MVBContextHome, YES);
         } @catch (NSException *e) {}
     });
 }
@@ -603,23 +686,55 @@ static char MVBDetectedCtxKey;
     MVB_NOTES_GUARD()
     @try {
         NSString *name = NSStringFromClass([self class]);
-        NSString *ctx = MVBContextForClassName(name);
-        [[MVBManager shared] logClassOnce:name context:ctx];
-        if (!ctx) return;
+        if (MVBIsSystemClassName(name)) return;
         // 排除键盘/选择器这类弹出的辅助控制器
         if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
-        // 只对「视图本体就是列表/滚动容器」的 VC 生效 —— 在非滚动容器上插背景
-        // 会被上层白底内容盖住, 白费功夫。首页/笔记正文例外 (结构特殊)。
+        NSString *ctx = MVBContextForClassName(name);
+        [[MVBManager shared] logClassOnce:name context:ctx ?: @"(未识别)"];
+        // v1.2.0: 认不出类名时不再「直接放弃」。以前 return 掉 -> 只要类名清单漏了
+        // 某个系统版本, 那个界面就整页毫无反应 (用户反馈「其他界面全都不生效」)。
+        // 现在: 只要这页「真的承载着列表/滚动容器」, 就按兜底语境 n_all 处理
+        // (n_all = 跟随七类界面里任意一个开关)。纯容器/辅助页仍然不动。
+        if (!ctx) {
+            if (!MVBViewHostsScrollable(self.view, 0)) return;
+            ctx = MVBContextAll;
+        }
+        // 只对「视图里真的承载着列表/滚动容器」的 VC 生效 —— 纯容器 VC 上插背景
+        // 会被上层白底内容盖住, 白费功夫。
+        // v1.2.0: 原来要求 self.view 本身必须是 UITableView/UICollectionView,
+        // 但备忘录的文件夹页/笔记列表页, self.view 是普通容器 (真列表是子视图),
+        // 于是被这条直接挡掉 -> 这些界面永远没背景。改为「子树里含有列表」即可,
+        // 既能覆盖真实页面, 又不会给纯容器重复挂背景。
         if (![ctx isEqualToString:MVBContextHome] &&
             ![ctx isEqualToString:MVBContextNote] &&
             ![self.view isKindOfClass:[UITableView class]] &&
-            ![self.view isKindOfClass:[UICollectionView class]]) return;
-        if ([ctx isEqualToString:MVBContextHome]) MVBApplyMainPage(self);
-        else [[MVBManager shared] applyToViewController:self context:ctx];
-        MVBRefreshBanner(ctx);
+            ![self.view isKindOfClass:[UICollectionView class]] &&
+            !MVBViewHostsScrollable(self.view, 0)) return;
+        MVBApplyPage(self, ctx);
     } @catch (NSException *e) {
         // 保证不崩溃
     }
+}
+// v1.2.0: 兜底再补一道 viewDidAppear —— 只在 viewWillAppear 那条路没挂上时动手
+// (有些页面是 push 后才建好视图 / 类名与显式 hook 不符, 只在 willAppear 里做会漏)。
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    MVB_NOTES_GUARD()
+    @try {
+        if ([[MVBManager shared] appliedContextForViewController:self].length) return;
+        NSString *name = NSStringFromClass([self class]);
+        if (MVBIsSystemClassName(name)) return;
+        if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
+        NSString *ctx = MVBContextForClassName(name);
+        if (!ctx) {
+            if (!MVBViewHostsScrollable(self.view, 0)) return;
+            ctx = MVBContextAll;
+        }
+        if (![ctx isEqualToString:MVBContextHome] &&
+            ![ctx isEqualToString:MVBContextNote] &&
+            !MVBViewHostsScrollable(self.view, 0)) return;
+        MVBApplyPage(self, ctx);
+    } @catch (NSException *e) {}
 }
 // 只走兜底路径的页面离开时也要暂停自己的播放器, 防声音穿透到其它界面。
 - (void)viewDidDisappear:(BOOL)animated {
@@ -733,22 +848,20 @@ static char MVBDetectedCtxKey;
                                name:AVAudioSessionInterruptionNotification object:nil];
                 } @catch (NSException *e) {}
 
-                // 等宿主 App 窗口就绪后挂诊断横幅 (重试 ~20 秒, 之后靠 VC 出现时刷新)
+                // 等宿主 App 窗口就绪后挂一次「注入确认」横幅。
+                // v1.2.0: 原来是每 2 秒重刷 10 次, 且固定用兜底语境 MVBContextAll ——
+                // 结果用户刚进某个界面时横幅先显示真实界面名, 一两秒后被刷成 n_all,
+                // 诊断时永远看到「界面[n_all] 开关=关」, 完全是误导 (用户实测反馈)。
+                // 现在只补一次, 且不覆盖已经由页面 hook 写好的真实语境。
                 @try {
-                    __block NSInteger tries = 0;
-                    dispatch_source_t timer = dispatch_source_create(
-                        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-                    dispatch_source_set_timer(timer,
-                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                        (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(0.2 * NSEC_PER_SEC));
-                    dispatch_source_set_event_handler(timer, ^{
-                        tries++;
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                 (int64_t)(2.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
                         @try {
-                            MVBRefreshBanner(MVBContextAll);
+                            NSString *cur = [[MVBManager shared] currentContext];
+                            if (!cur.length) MVBRefreshBanner(MVBContextAll);
                         } @catch (NSException *e) {}
-                        if (tries >= 10) dispatch_source_cancel(timer);
                     });
-                    dispatch_resume(timer);
                 } @catch (NSException *e) {}
             }
         } @catch (NSException *e) {}

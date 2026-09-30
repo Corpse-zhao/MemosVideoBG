@@ -23,7 +23,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define MVB_VERSION @"1.1.0"
+#define MVB_VERSION @"1.2.0"
 #define MVB_SUITE @"com.nvb.memosvideobg"
 #define MVB_DARWIN_NOTE "com.nvb.memosvideobg/prefs.changed"
 #define MVB_MEDIA_DIR_NAME @"MemosVideoBG"
@@ -128,6 +128,11 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void);
 - (void)migrateMediaIntoPrimaryRoot;
 
 #pragma mark 背景应用
+// v1.2.0: 最近一次应用的界面 + 该页 VC 类名 —— 供「无 VC 上下文的 chrome 钩子」
+// 判断该不该清扫, 以及诊断横幅显示当前页真实类名 (此前横幅被定时器盖成兜底 n_all)
+@property (nonatomic, copy) NSString *currentContext;
+@property (nonatomic, copy) NSString *lastVCClass;
+
 - (AVPlayer *)playerForContext:(NSString *)ctx forceRebuild:(BOOL)force;
 - (void)applyToViewController:(UIViewController *)vc context:(NSString *)ctx;
 - (NSString *)appliedContextForViewController:(UIViewController *)vc;
