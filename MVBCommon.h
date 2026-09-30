@@ -23,7 +23,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define MVB_VERSION @"1.2.0"
+#define MVB_VERSION @"1.3.0"
 #define MVB_SUITE @"com.nvb.memosvideobg"
 #define MVB_DARWIN_NOTE "com.nvb.memosvideobg/prefs.changed"
 #define MVB_MEDIA_DIR_NAME @"MemosVideoBG"
@@ -93,6 +93,9 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void);
 - (NSDictionary *)effectiveConfig;
 - (id)configValueForKey:(NSString *)key;
 - (void)setConfigValue:(id)value forKey:(NSString *)key;
+// v1.3.0: 作废配置快照。配置读取有 0.5s 短缓存 (清扫要按视图树每个节点判一次,
+// 原来是上千次同步读盘 -> 「卡一下」)；收到跨进程配置变更通知时必须先作废。
+- (void)invalidateConfigCache;
 
 - (BOOL)masterEnabled;
 // 全局效果 (0~1)
@@ -141,6 +144,12 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void);
 - (void)postChangeNotification;
 - (void)startMediaWatchdog;
 
+#pragma mark v1.3.0 背景层可见性 (修「视频透到上一层」)
+// 一个页面被另一个页面/弹窗盖住时, 它的视频必须挂起 —— 否则上层页面被清成透明后,
+// 下面那页还在播的视频就会透上来 (用户看到的「视频图层透到上一层」/「两个界面视频一样」)。
+- (MVBVideoBackgroundView *)backgroundForViewController:(UIViewController *)vc;
+- (void)refreshCoveredBackgrounds;
+
 #pragma mark 前后台自愈
 - (void)handleAppEnterBackground;
 - (void)handleAppWillEnterForeground;
@@ -168,6 +177,9 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void);
 @interface MVBVideoBackgroundView : UIView
 @property (nonatomic, copy) NSString *contextKey;
 @property (nonatomic, strong) AVPlayerLayer *videoLayer;
+// v1.3.0: 被上层页面/弹窗盖住 -> 挂起 (不显示)。与「开关是否开启」是两个独立维度,
+// 所以不能直接写 hidden (configure 会把它按开关重新算一遍)。
+@property (nonatomic, assign) BOOL suspended;
 - (instancetype)initWithFrame:(CGRect)frame contextKey:(NSString *)key;
 - (void)configure;
 - (void)reconnectPlayerForce:(BOOL)force;

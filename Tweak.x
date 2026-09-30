@@ -212,8 +212,14 @@ static NSString *MVBDetectNotesContext(UIViewController *vc, NSString *fallback)
 }
 
 // 横幅刷新 (注入探针进程也能用, 内容会标明是哪个 App)
+// v1.3.0: 加 0.6s 节流 —— 横幅文案要列目录 (IO) + 建窗口, 而一次页面出现会被
+// 兜底 hook 与显式 hook 各触发一次; 启动瞬间重复拼两遍会拖慢首帧。
+static CFAbsoluteTime sMVBLastBannerAt = 0;
 static void MVBRefreshBanner(NSString *ctx) {
     @try {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (sMVBLastBannerAt > 0 && now - sMVBLastBannerAt < 0.6) return;
+        sMVBLastBannerAt = now;
         // v1.9.0: 未授权提示不受「诊断横幅」开关影响, 必须让用户看到原因
         if (!MVBIsLicensed()) MVBShowDebugBannerForce([[MVBManager shared] bannerTextForContext:ctx]);
         else                 MVBShowDebugBanner([[MVBManager shared] bannerTextForContext:ctx]);
@@ -301,7 +307,13 @@ static BOOL MVBSweepActiveForContext(NSString *ctx) {
     if (!MVBIsLicensed()) return NO;   // v1.9.0: 未授权不做任何清扫
     if (!ctx.length) return NO;
     MVBManager *m = [MVBManager shared];
-    return m.masterEnabled && [m isEnabledForContext:ctx];
+    if (!m.masterEnabled || ![m isEnabledForContext:ctx]) return NO;
+    // v1.3.0: 本界面**真的配了素材**才允许清底。
+    // 此前只看开关 —— 某个界面没配素材时它的页面照样被刷成透明, 于是「透过去」看到的
+    // 就是后面那一页还在播的视频 (用户: 「视频图层会透到上一层」「首页跟多多创新的
+    // 视频是一样的」), 或者是系统窗口的白底 (「刚点进备忘录卡一下白一下」)。
+    // 没有背景可显示时就该原样保留 —— 不该在页面上开一个洞。
+    return [m activeVideoPathForContext:ctx].length > 0;
 }
 
 // 供「拿不到 VC 上下文」的 chrome 钩子使用: 取最近一次应用的界面
@@ -312,7 +324,10 @@ static BOOL MVBMainSweepActive(void) {
 static void MVBClearContainerBGs(UIView *v, NSInteger depth, NSString *ctx, BOOL hideCards) {
     if (!v || depth > 14) return;
     if ([v isKindOfClass:[MVBVideoBackgroundView class]]) return;
-    if (!MVBSweepActiveForContext(ctx)) { MVBRestoreHiddenCards(); return; }
+    // v1.3.0: 「本界面该不该清」只在最外层判一次。原来每层都判, 而每次判定要读配置 +
+    // 列素材目录 (同步 IO) —— 一页几百个节点就是几百次 IO, 是「卡一下」的主要来源。
+    // ctx 在整棵树里是常量, 结果必然相同。
+    if (depth == 0 && !MVBSweepActiveForContext(ctx)) { MVBRestoreHiddenCards(); return; }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -347,8 +362,8 @@ static void MVBClearContainerBGs(UIView *v, NSInteger depth, NSString *ctx, BOOL
 }
 
 // v1.2.0: 清扫入口 (带节流)。
-// 同一页面出现时, 兜底 hook 与显式 hook 会各调一次 MVBApplyPage, 再加上 3 段延迟补扫
-// —— 整树遍历 4~6 遍没必要。这里 0.12s 内只真正扫一次, 剩下的交给后面的补扫兜住。
+// 同一页面出现时, 兜底 hook 与显式 hook 会各调一次 MVBApplyPage, 再加上多段延迟补扫
+// —— 整树遍历好几遍没必要。这里 0.12s 内只真正扫一次, 剩下的交给后面的补扫兜住。
 static CFAbsoluteTime sMVBLastSweepAt = 0;
 static void MVBSweepPage(UIView *v, NSString *ctx, BOOL hideCards) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -357,25 +372,68 @@ static void MVBSweepPage(UIView *v, NSString *ctx, BOOL hideCards) {
     MVBClearContainerBGs(v, 0, ctx, hideCards);
 }
 
+// v1.3.0: 「当前页的视频出画面了没有」。
+// 为什么需要它: 清底 (把页面刷透明) 必须在视频首帧**已解码**之后才能做。
+// 先把页面清成透明、视频却还在准备 -> 中间露出的就是系统窗口的白底,
+// 用户看到的就是「刚点进备忘录卡一下白一下」。
+// 没有背景视图 (该界面没开 / 没素材) 时返回 YES —— 那种情况不需要等。
+static BOOL MVBPageVideoReady(UIViewController *vc) {
+    MVBVideoBackgroundView *bg = [[MVBManager shared] backgroundForViewController:vc];
+    if (!bg || !bg.videoLayer) return YES;   // 没有背景/还没建层 -> 无需等
+    return bg.videoLayer.isReadyForDisplay;
+}
+
+// v1.3.0: 清扫前的统一闸门 —— 页面里的白底/白卡只在「本页视频已出画面」后才清。
+static void MVBSweepIfReady(UIViewController *vc, NSString *ctx, BOOL hideCards) {
+    if (!vc || !vc.isViewLoaded || !vc.view.window) return;
+    if (!MVBPageVideoReady(vc)) return;
+    MVBSweepPage(vc.view, ctx, hideCards);
+}
+
 // v1.2.0: 任意界面都挂背景 + 清扫 + 延迟补扫。
 // 此前只有首页做清扫 (MVBApplyMainPage), 其它界面只挂背景 -> 被白底盖住 = 「不生效」。
 // hideCards (藏大面积白卡) 仍只在首页开启。
+static char MVBLastApplyAtKey;
+static char MVBLastApplyCtxKey;
 static void MVBApplyPage(UIViewController *vc, NSString *ctx) {
+    if (!vc || !ctx.length) return;
+    // v1.3.0: 同一页面 + 同一语境 250ms 内只真正做一次
+    // (兜底 hook 与显式 hook 会各调一次, 重复跑一遍 apply 很贵: 要扫全部窗口的 chrome)
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    NSNumber *lastAt = objc_getAssociatedObject(vc, &MVBLastApplyAtKey);
+    NSString *lastCtx = objc_getAssociatedObject(vc, &MVBLastApplyCtxKey);
+    if (lastAt && lastCtx && [lastCtx isEqualToString:ctx] &&
+        now - lastAt.doubleValue < 0.25) return;
+    objc_setAssociatedObject(vc, &MVBLastApplyAtKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(vc, &MVBLastApplyCtxKey, [ctx copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     [[MVBManager shared] applyToViewController:vc context:ctx];
     BOOL hideCards = [ctx isEqualToString:MVBContextHome];
-    MVBSweepPage(vc.view, ctx, hideCards);
     MVBRefreshBanner(ctx);
     __weak UIViewController *wvc = vc;
     NSString *ctxCopy = [ctx copy];
-    NSTimeInterval delays[3] = {0.45, 1.2, 2.5};
-    for (int i = 0; i < 3; i++) {
+    // 首帧前密集试探 (一到位立刻清底), 之后按原来的节奏补扫兜住延迟铺上来的白卡。
+    // 0.8s 之后不再等 —— 万一某个素材的 layer 一直不上报 ready, 也不能让页面一直不清底
+    // (宁可接受一次轻微的闪, 也不能变成「完全没背景」)。
+    NSTimeInterval delays[8] = {0.08, 0.16, 0.28, 0.45, 0.8, 1.4, 2.5, 5.0};
+    for (int i = 0; i < 8; i++) {
         NSTimeInterval t = delays[i];
+        BOOL force = (i >= 4);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             @try {
                 UIViewController *s = wvc;
                 if (!s || !s.isViewLoaded || !s.view.window) return;
-                MVBSweepPage(s.view, ctxCopy, hideCards);
+                // v1.3.0: 视图确实回到窗口了 -> 重算一次「谁被盖住」。
+                // 从下一层返回时, viewWillAppear 那一刻视图可能还没挂回窗口,
+                // 那一拍算出来的「被盖住」是假阳性; 这里补一次保证背景必定回来。
+                [[MVBManager shared] refreshCoveredBackgrounds];
+                if (force) {
+                    // 兜底: 视频一直没出画面也不再拖, 照常清底
+                    MVBSweepPage(s.view, ctxCopy, hideCards);
+                    return;
+                }
+                MVBSweepIfReady(s, ctxCopy, hideCards);
             } @catch (NSException *e) {}
         });
     }
@@ -385,6 +443,8 @@ static void MVBApplyPage(UIViewController *vc, NSString *ctx) {
 // (CFNotificationCenterAddObserver 要求一个 C 函数指针, 不能直接传消息表达式)
 static void MVBPrefsChanged(CFNotificationCenterRef center, void *observer,
                             CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    // v1.3.0: 控制App 改了配置 -> 先作废配置快照, 再让所有背景视图重新 configure
+    [[MVBManager shared] invalidateConfigCache];
     [[MVBManager shared] refreshVisibleBackgrounds];
 }
 

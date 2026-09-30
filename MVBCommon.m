@@ -465,6 +465,43 @@ static UIViewController *MVBViewControllerForView(UIView *view) {
     return (UIViewController *)r;
 }
 
+// v1.3.0: 这个 VC 是不是「被别的页面/弹窗盖住了」。
+// 为什么需要它: 上层页面被我们清成透明之后, 如果下面那页的视频还在显示, 就会「透上来」——
+// 用户看到的「视频图层透到上一层」「首页跟多多创新的视频一模一样」都是这个。
+// 判据全部用系统自己的状态, 不猜类名:
+//   · 视图已不在窗口里, 且自己不是所在导航栈的栈顶 -> 被盖 (push 走的那一页)
+//   · 有模态/覆盖式页面压在自己或所在容器 (导航/标签/分栏) 上 -> 被盖
+//     (这种情形宿主页视图仍留在窗口里, 它的视频层照旧在渲染 = 透层的直接成因)
+static BOOL MVBViewControllerIsCovered(UIViewController *vc) {
+    if (!vc) return YES;
+    if (!vc.isViewLoaded) return YES;
+    UINavigationController *nav = vc.navigationController;
+    if (!vc.view.window) {
+        // 视图不在窗口里 —— 通常 = 已被上层页面完全取代 (被盖住)。
+        // 例外: 「正在出现」的页面 (自己是所在导航栈的栈顶) 也会短暂处于窗口外,
+        // 那不是被盖住。若把它也算被盖住, 从下一层返回时上一页的视频会一直不回来。
+        if (!(nav && nav.topViewController == vc)) return YES;
+    }
+    UIViewController *pres = vc.presentedViewController;
+    if (pres && !pres.isBeingDismissed) return YES;
+    if (nav) {
+        if (nav.topViewController && nav.topViewController != vc) return YES;
+        UIViewController *np = nav.presentedViewController;
+        if (np && !np.isBeingDismissed) return YES;
+    }
+    UITabBarController *tab = vc.tabBarController;
+    if (tab) {
+        UIViewController *tp = tab.presentedViewController;
+        if (tp && !tp.isBeingDismissed) return YES;
+    }
+    UISplitViewController *split = vc.splitViewController;
+    if (split) {
+        UIViewController *sp = split.presentedViewController;
+        if (sp && !sp.isBeingDismissed) return YES;
+    }
+    return NO;
+}
+
 // 对外暴露的可写性探测 (控制App 诊断页需要)
 BOOL MVBDirWritablePath(NSString *dir) {
     return MVBDirWritable(dir);
@@ -478,7 +515,13 @@ BOOL MVBDirWritablePath(NSString *dir) {
 @property (nonatomic, strong) NSMutableDictionary<NSString *, AVPlayerLooper *> *loopers;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *playerPaths;
 @property (nonatomic, strong) NSMutableSet<NSString *> *loggedClasses;
+// v1.3.0: 挂了背景的 VC 弱表 —— 只遍历这几个算「有没有被盖住」, 不扫全窗口
+@property (nonatomic, strong) NSHashTable<UIViewController *> *bgViewControllers;
+// v1.3.0: 配置短缓存 (见 effectiveConfig 注释)
+@property (nonatomic, strong) NSDictionary *configCache;
+@property (nonatomic, assign) CFAbsoluteTime configCacheAt;
 // 私有方法前置声明 (避免 -Wobjc-method-access 在 -Werror 下报错)
+- (void)invalidateConfigCache;
 - (NSArray<NSString *> *)configPaths;
 - (CGFloat)numForKey:(NSString *)k default:(CGFloat)d;
 - (NSArray<NSString *> *)directoriesForContext:(NSString *)ctx includeRootFallback:(BOOL)fallback;
@@ -486,6 +529,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
 - (NSArray<NSString *> *)listFilesInDir:(NSString *)dir;
 - (void)attachBackground:(MVBVideoBackgroundView *)bg toViewController:(UIViewController *)vc;
 - (void)detachBackground:(MVBVideoBackgroundView *)bg fromViewController:(UIViewController *)vc;
+- (void)setSuspended:(BOOL)suspended forBackground:(MVBVideoBackgroundView *)bg;
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
 - (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
 - (void)hideViewTemporarily:(UIView *)v;   // v1.7.9
@@ -517,6 +561,8 @@ BOOL MVBDirWritablePath(NSString *dir) {
         _loopers       = [NSMutableDictionary new];
         _playerPaths   = [NSMutableDictionary new];
         _loggedClasses = [NSMutableSet new];
+        // v1.3.0: 挂了背景的 VC 弱表 (算「有没有被上层盖住」时只遍历这几个, 不扫全窗口)
+        _bgViewControllers = [NSHashTable weakObjectsHashTable];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(playerDidEnd:)
                                                      name:@"AVPlayerItemDidPlayToEndTime"
@@ -559,7 +605,21 @@ BOOL MVBDirWritablePath(NSString *dir) {
     return a;
 }
 
+// v1.3.0: 配置短缓存。
+// 原来每次 configValueForKey: 都要重新读 prefs + 逐个根目录同步读 plist 文件;
+// 而「清扫」要对视图树每一个节点判一次「该不该清」—— 一页几百个节点 × 8 轮补扫
+// = 上千次同步磁盘读, 这就是「刚点进去卡一下」的主要来源。
+// 0.5s 内复用同一份快照: 一次清扫只真正读一遍。配置变更走
+// postChangeNotification / Darwin 通知 -> invalidateConfigCache, 所以不会读到过期值。
+- (void)invalidateConfigCache {
+    self.configCache = nil;
+    self.configCacheAt = 0;
+}
+
 - (NSDictionary *)effectiveConfig {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (self.configCache && self.configCacheAt > 0 && now - self.configCacheAt < 0.5)
+        return self.configCache;
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     @try {
         NSDictionary *pd = [[self prefs] dictionaryRepresentation];
@@ -571,6 +631,8 @@ BOOL MVBDirWritablePath(NSString *dir) {
             if ([fd isKindOfClass:[NSDictionary class]]) [d addEntriesFromDictionary:fd];
         } @catch (NSException *e) {}
     }
+    self.configCache = d;
+    self.configCacheAt = now;
     return d;
 }
 
@@ -585,6 +647,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
 
 - (void)setConfigValue:(id)value forKey:(NSString *)key {
     if (!key.length) return;
+    [self invalidateConfigCache];   // v1.3.0: 要写配置了, 快照先作废 (后面会重建成最新)
     // 1) prefs 通道 (控制App 侧一定可用)
     @try {
         NSUserDefaults *p = [self prefs];
@@ -683,6 +746,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
 }
 
 - (void)postChangeNotification {
+    [self invalidateConfigCache];   // v1.3.0: 本进程的配置快照同步作废 (跨进程由接收方作废)
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR(MVB_DARWIN_NOTE), NULL, NULL, YES);
 }
@@ -796,31 +860,29 @@ BOOL MVBDirWritablePath(NSString *dir) {
 // 但 v10.4.0 起素材已「摊平」到根目录 (界面子目录只剩历史遗留), 于是横幅永远显示
 // 「素材=0」, 用户以为素材没读到, 排查全被带偏 (真机截图实锤)。
 // 现在: 主数字 = 根目录下的视频文件数 (真正被读取的那批), 另外单列旧子目录残留。
+// v1.3.0: 「旧子目录残留」改成直接用已经列出来的根目录条目判断, 不再对 7 个界面子目录
+// 各做一次目录列举 —— 横幅是在主线程上拼的, 每次多 7 次 IO 会拖慢启动首帧。
 - (NSString *)rootsSummaryForContext:(NSString *)ctx {
     (void)ctx;   // v1.2.0: 不再按界面子目录统计 (素材已摊平到根目录), 参数保留兼容调用点
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray<NSString *> *movieExts = @[@"mp4", @"mov", @"m4v", @"3gp", @"mkv", @"webm"];
+    NSMutableSet<NSString *> *legacyNames = [NSMutableSet set];
+    for (NSArray<NSString *> *def in MVBContextDefinitions()) [legacyNames addObject:def[0]];
     NSInteger idx = 0;
     for (NSString *root in MVBRootCandidates()) {
         idx++;
         BOOL ex = [fm fileExistsAtPath:root];
         NSArray *raw = ex ? [fm contentsOfDirectoryAtPath:root error:nil] : nil;
-        NSUInteger n = 0;
-        for (NSString *f in raw)
+        NSUInteger n = 0, legacy = 0;
+        for (NSString *f in raw) {
             if ([movieExts containsObject:f.pathExtension.lowercaseString]) n++;
+            else if ([legacyNames containsObject:f]) legacy++;   // 旧版界面子目录残留
+        }
         [s appendFormat:@"根%ld %@ 在=%@ 可读=%@ 视频=%lu", (long)idx,
             MVBRootLabel(root), ex ? @"是" : @"否",
             [fm isReadableFileAtPath:root] ? @"是" : @"否", (unsigned long)n];
-        // 旧版界面子目录若还没摊平, 点出来 (启动时会自动搬进根目录)
-        NSUInteger legacy = 0;
-        for (NSArray<NSString *> *def in MVBContextDefinitions()) {
-            NSArray *sub = [fm contentsOfDirectoryAtPath:
-                [root stringByAppendingPathComponent:def[0]] error:nil];
-            for (NSString *f in sub)
-                if (![f hasPrefix:@"."]) legacy++;
-        }
-        if (legacy) [s appendFormat:@" (旧子目录残留 %lu 项, 启动会自动合并)", (unsigned long)legacy];
+        if (legacy) [s appendFormat:@" (旧子目录 %lu 个, 启动会自动合并)", (unsigned long)legacy];
         [s appendString:@"\n"];
     }
     return s;
@@ -874,6 +936,20 @@ BOOL MVBDirWritablePath(NSString *dir) {
     // v1.2.0: 打出当前页真实类名 —— 一眼看出「这个页面到底被认成谁」
     if (self.lastVCClass.length)
         [s appendFormat:@"当前页类名 %@\n", self.lastVCClass];
+    // v1.3.0: 背景层状态 —— 分清「根本没挂上」「挂上了但首帧还没到(所以先不清底)」
+    // 「被上层盖住已挂起」三种完全不同的情形
+    @try {
+        MVBVideoBackgroundView *cur = nil;
+        NSString *want = ctx ?: MVBContextAll;
+        for (UIViewController *v in self.bgViewControllers.allObjects) {
+            MVBVideoBackgroundView *b = objc_getAssociatedObject(v, &MVBBGKey);
+            if (b && [b.contextKey isEqualToString:want]) { cur = b; break; }
+        }
+        [s appendFormat:@"背景层 本页=%@ 画面=%@ 挂起=%@\n",
+            cur ? @"有" : @"无",
+            (!cur || cur.videoLayer.isReadyForDisplay) ? @"就绪" : @"准备中",
+            (cur && cur.suspended) ? @"是" : @"否"];
+    } @catch (NSException *e) {}
     [s appendString:@"（点本横幅可隐藏；控制App 里可关闭）"];
     return s;
 }
@@ -1414,6 +1490,35 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     } @catch (NSException *e) { return nil; }
 }
 
+#pragma mark - v1.3.0 背景层可见性
+
+- (MVBVideoBackgroundView *)backgroundForViewController:(UIViewController *)vc {
+    if (!vc) return nil;
+    @try { return objc_getAssociatedObject(vc, &MVBBGKey); } @catch (NSException *e) { return nil; }
+}
+
+// 挂起 / 恢复某个背景视图。注意 hidden 是「开关是否开启 + 是否被盖住」两个维度的合成结果,
+// 所以这里不去直接写 hidden, 而是改 suspended 后让 configure 重算一遍
+// (也不会漏掉透明度/模糊/音量的重新套用)。
+- (void)setSuspended:(BOOL)suspended forBackground:(MVBVideoBackgroundView *)bg {
+    if (!bg) return;
+    if (bg.suspended == suspended) return;
+    bg.suspended = suspended;
+    [bg configure];
+}
+
+// 重算「哪些页面的视频该显示」: 只让没被盖住的那个 VC 显示自己的视频。
+// 被盖住的一律挂起 —— 否则上层页面被清成透明后, 下面那页的视频会透上来。
+- (void)refreshCoveredBackgrounds {
+    @try {
+        for (UIViewController *vc in self.bgViewControllers.allObjects) {
+            MVBVideoBackgroundView *bg = objc_getAssociatedObject(vc, &MVBBGKey);
+            if (!bg) continue;
+            [self setSuspended:MVBViewControllerIsCovered(vc) forBackground:bg];
+        }
+    } @catch (NSException *e) {}
+}
+
 - (void)applyToViewController:(UIViewController *)vc context:(NSString *)ctx {
     @try {
         if (!vc.isViewLoaded || !vc.view) return;
@@ -1445,11 +1550,20 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             bg = [[MVBVideoBackgroundView alloc] initWithFrame:vc.view.bounds contextKey:ctx];
             objc_setAssociatedObject(vc, &MVBBGKey, bg, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
+        [self.bgViewControllers addObject:vc];   // v1.3.0: 供「被盖住就挂起」遍历
         [self attachBackground:bg toViewController:vc];
         [bg configure];
 
-        vc.view.backgroundColor = [UIColor clearColor];
-        [self clearBackgroundsOfView:vc.view depth:0];
+        // v1.3.0: 清底 (把整页刷透明) 必须等视频首帧**已解码**才能做。
+        // 先刷透明、视频却还在准备 -> 中间露出的就是系统窗口白底, 用户看到的就是
+        // 「刚点进备忘录卡一下白一下」。没就绪时这里先不清, 交给 Tweak 侧的多段延迟
+        // 补扫在首帧到达后补做 (那套清得更彻底); 0.8s 后仍没就绪也会强制清底兜底。
+        // 注意: 导航栏/工具栏透明化、chrome 拆材质这些照旧做 —— 它们背后仍是本页
+        // 自己的不透明内容, 看不出差别, 不影响首帧观感。
+        if (bg.videoLayer.isReadyForDisplay) {
+            vc.view.backgroundColor = [UIColor clearColor];
+            [self clearBackgroundsOfView:vc.view depth:0];
+        }
 
         // 导航栏滚动时会从透明(scrollEdge)切到不透明(standard)外观 -> 顶部白条。
         // 背景生效期间两种外观都设为透明, 并保持住 (写在 apply 里, 每次出现都刷新)。
@@ -1496,6 +1610,11 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         } @catch (NSException *e) {}
 
         // 记录一次活动 (供诊断页判断 hook 是否真的触发)
+        // v1.3.0: 这一页刚挂好背景 —— 立刻重算一遍可见性:
+        //   ① 新页面出现 => 它自己显示, 被它盖住的那些页面 (push 的下层 / 宿主页) 挂起
+        //   ② 从上层返回 => 本页重新可见, 上层残留的挂起被解除
+        [self refreshCoveredBackgrounds];
+
         [self writeHeartbeat:[NSString stringWithFormat:@"apply ctx=%@ cls=%@",
                               ctx, NSStringFromClass([vc class])]];
     } @catch (NSException *e) {
@@ -2043,7 +2162,8 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
         MVBManager *mgr = [MVBManager shared];
         BOOL on = [mgr masterEnabled] && [mgr isEnabledForContext:self.contextKey] &&
                   [mgr activeVideoPathForContext:self.contextKey].length > 0;
-        self.hidden = !on;
+        // v1.3.0: hidden = 「开关没开」 或 「被上层盖住」。后者由 refreshCoveredBackgrounds 维护。
+        self.hidden = (!on || self.suspended);
         if (!on) {
             self.videoLayer.player = nil;
             self.videoLayer.filters = nil;
