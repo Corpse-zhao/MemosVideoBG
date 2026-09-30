@@ -1537,22 +1537,61 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     } @catch (NSException *e) {}
 }
 
+// v1.3.5: 「暴力摘材质」扫尾 —— 把 vc.view / nav.view 子树里所有 UIVisualEffectView
+// 一律清掉 effect。
+// 为什么暴力: iOS 备忘录的页面背景经常会被包成「scrollView → _UIKBVisualEffectView →
+// 内部 _UIKBBackgroundEffectView → VSIgaussianBlur」这样的多层私有 effect 栈, 即便
+// stripPageBackdropMaterial 阈值放宽到 50% 也未必命中全部; 只要其中任一层留着 effect,
+// 用户看到的视频就还是雾蒙蒙。
+// 豁免: UIToolbar / UINavigationBar / UISearchBar 子树 —— 它们有自己的 appearance 体系,
+// 摘掉 effect 会让工具栏变纯白非透明。但工具栏的「白条」其实由 MVBTransparentizeBar 解决,
+// 这里只管「页面背景」这一类。
+// 深度 12 + vc.view + nav.view 双源, 整页覆盖。
+static BOOL MVBIsEffectViewInChrome(UIView *v) {
+    for (UIView *p = v.superview; p; p = p.superview) {
+        if ([p isKindOfClass:[UIToolbar class]] ||
+            [p isKindOfClass:[UINavigationBar class]] ||
+            [p isKindOfClass:[UISearchBar class]]) return YES;
+    }
+    return NO;
+}
+static void MVBAggressiveStripMaterialsIn(UIView *v, NSInteger depth) {
+    if (!v || depth > 10) return;
+    for (UIView *sub in [v.subviews copy]) {
+        if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) continue;
+        if ([sub isKindOfClass:[UIVisualEffectView class]] &&
+            !MVBIsEffectViewInChrome(sub)) {
+            UIVisualEffectView *ev = (UIVisualEffectView *)sub;
+            if (ev.effect) {
+                if (!objc_getAssociatedObject(ev, &MVBOrigEffectKey))
+                    objc_setAssociatedObject(ev, &MVBOrigEffectKey, ev.effect,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                ev.effect = nil;
+                ev.backgroundColor = [UIColor clearColor];
+            }
+        }
+        MVBAggressiveStripMaterialsIn(sub, depth + 1);
+    }
+}
+
 // v1.3.1: 摘掉「整页级」的材质背板 —— 也就是那种铺满整个页面、用来做模糊底衬的
 // UIVisualEffectView (iOS 的一些操作面板/浮层整页就是一层 .systemMaterial 模糊)。
 // 为什么必须摘: ① 它会把我们的视频一起糊掉 —— 用户看到「视频模糊看不清」;
 //              ② 模糊会采样它背后的内容 —— 后面那一页的文件夹/文字会被糊着透出来,
 //                 用户看到「多多创新页里还能看到首页的文件夹」。
-// 只动「几乎铺满整页」的材质层 (>=95% 宽高), 卡片/小控件/局部模糊一律不碰。
-// 原始 effect 照惯例存起来, 便于「原样档」恢复。
+// v1.3.5: 把阈值从 95% 放宽到 50% —— 最近删除/搜索结果列表这种页面用的是
+// systemUltraThinMaterial 铺满整个 UIScrollView 区域, 不到 95% 但视觉上覆盖全屏;
+// 把深度 8 提到 12 (iOS 16 备忘录的私有视图层级有些私有 wrapper 套了 5-6 层)。
 - (void)stripPageBackdropMaterialInView:(UIView *)view page:(UIView *)page depth:(NSInteger)depth {
-    if (!view || !page || depth > 8) return;
+    if (!view || !page || depth > 12) return;
     CGSize ps = page.bounds.size;
     for (UIView *sub in [view.subviews copy]) {
         if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) continue;
         if ([sub isKindOfClass:[UIVisualEffectView class]]) {
             CGSize s = sub.bounds.size;
+            // v1.3.5: 阈值 95% → 50%; 最近删除那种「页面级」材质层通常 ≥ 50% 但 < 95%
             if (ps.width > 1 && ps.height > 1 &&
-                s.width >= ps.width * 0.95 && s.height >= ps.height * 0.95) {
+                s.width >= ps.width * 0.5 && s.height >= ps.height * 0.5) {
                 UIVisualEffectView *ev = (UIVisualEffectView *)sub;
                 if (!objc_getAssociatedObject(ev, &MVBOrigEffectKey) && ev.effect)
                     objc_setAssociatedObject(ev, &MVBOrigEffectKey, ev.effect,
@@ -1684,6 +1723,15 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         [self stripPageBackdropMaterialInView:vc.view page:vc.view depth:0];
     } @catch (NSException *e) {}
     [self refreshChromeAppearancesForViewController:vc];
+
+    // v1.3.5: 「暴力摘材质」扫尾 —— 修最近删除/搜索结果这种 systemUltraThinMaterial
+    // 嵌套在私有 wrapper 中, stripPageBackdropMaterial 阈值放低到 50% 也未必全命中的场景。
+    // 只动页面背景类的 (vc.view + nav.view), 不动 toolbar/navBar 子树 (由 appearance 处理)。
+    @try {
+        MVBAggressiveStripMaterialsIn(vc.view, 0);
+        UIView *navView = vc.navigationController.view;
+        if (navView && navView != vc.view) MVBAggressiveStripMaterialsIn(navView, 0);
+    } @catch (NSException *e) {}
 
     // 深度透明化: 顶栏/底栏/大标题等系统 chrome 的模糊层扫一遍。
     // v1.3.1: 导航控制器的视图也要扫 —— 导航栏与 toolbar 都在它里面, 而它们
