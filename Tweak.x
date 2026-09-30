@@ -119,6 +119,18 @@ static NSString *MVBContextForClassName(NSString *rawName) {
         ([name containsString:@"Folder"] && [name containsString:@"And"]))
         return MVBContextInnovate;
 
+    // ③b v1.3.1: 内部页 (设置/账户/更多/关于/标签样式...) —— **必须排在「笔记」前面**。
+    // 备忘录不少内部页的类名里也带 "Editor" (xxEditorSettingsController 之类),
+    // 而旧顺序先判 "Editor" 再判 "Settings" -> 这些页面全被判成「笔记」,
+    // 用户看到的就是「内部页跟笔记显示的是同一支视频」。
+    // 内部页天然带「设置/账户/更多/关于」这类词, 先判它们最稳。
+    if ([name containsString:@"Settings"]   || [name containsString:@"Setting"] ||
+        [name containsString:@"Preference"] || [name containsString:@"Account"] ||
+        [name containsString:@"Debug"]      || [name containsString:@"About"] ||
+        [name containsString:@"License"]    || [name containsString:@"Advanced"] ||
+        [name containsString:@"Style"]      || [name containsString:@"More"])
+        return MVBContextInner;
+
     // ④ 笔记正文 (Body = 只读正文, Edit = 编辑) —— 必须放在 Folder 前面判,
     //    因为 ICNoteBodyViewController 不含 Folder, 但有些类名同时含 Note 与 Folder
     if ([name containsString:@"NoteBody"] || [name containsString:@"NoteEdit"] ||
@@ -136,13 +148,24 @@ static NSString *MVBContextForClassName(NSString *rawName) {
     // ⑥b v1.2.0: 笔记列表在部分系统版本上叫 *Browse* (ICNoteBrowseViewController 之类)
     if ([name containsString:@"Browse"]) return MVBContextFolder;
 
-
-    // ⑦ 其它内部子页面 (设置/更多/账户/附件等)
-    if ([name containsString:@"Settings"] || [name containsString:@"Account"] ||
-        [name containsString:@"More"]     || [name containsString:@"Debug"])
-        return MVBContextInner;
-
     return nil;
+}
+
+// v1.3.1: 这个控制器是不是「被模态/覆盖式呈现出来的操作面板」。
+// 用途: 「新建文件夹」这类面板往往用私有类名 (不在我们的关键词表里), 认不出就一直落到
+// 兜底语境 n_all —— 而 n_all 会解析到「根目录排序第一个」那支素材, 于是用户看到
+// 「多多创新显示的也是首页的视频素材」。
+// 备忘录里被 present 出来的东西基本都是操作面板 = 多多创新, 所以这个判据很划算,
+// 而且完全不依赖类名 (系统换类名也不影响)。
+static BOOL MVBIsPresentedPanel(UIViewController *vc) {
+    if (!vc) return NO;
+    @try {
+        if (vc.isBeingDismissed) return NO;
+        if (vc.presentingViewController) return YES;
+        UIViewController *nav = vc.navigationController;
+        if (nav && nav.presentingViewController) return YES;
+    } @catch (NSException *e) {}
+    return NO;
 }
 
 // 只对「确认返回对象类型(@)的方法」做消息发送 —— 返回结构体/原始类型的选择器
@@ -428,6 +451,12 @@ static void MVBApplyPage(UIViewController *vc, NSString *ctx) {
                 // 从下一层返回时, viewWillAppear 那一刻视图可能还没挂回窗口,
                 // 那一拍算出来的「被盖住」是假阳性; 这里补一次保证背景必定回来。
                 [[MVBManager shared] refreshCoveredBackgrounds];
+                // v1.3.1: 系统 chrome (导航栏/导航项/底部工具栏/材质背板) 常常晚于
+                // viewWillAppear 才建好或才铺上材质, 只在 apply 里做一次会「看运气」。
+                // 在偏后的节拍重刷: 顺便消掉「第一次进是白条、退回来再进才透明」。
+                // 只在 0.8s 之后刷 —— 更早的节拍视频首帧还没到, 提前拆材质/藏内容会闪白。
+                if (i == 4 || i == 5 || i == 7)
+                    [[MVBManager shared] refreshChromeForViewController:s context:ctxCopy];
                 if (force) {
                     // 兜底: 视频一直没出画面也不再拖, 照常清底
                     MVBSweepPage(s.view, ctxCopy, hideCards);
@@ -750,14 +779,20 @@ static char MVBDetectedCtxKey;
         // 排除键盘/选择器这类弹出的辅助控制器
         if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
         NSString *ctx = MVBContextForClassName(name);
+        // v1.3.1: 类名认不出 -> 再用「页面标题」认一次 (新建文件夹/搜索/最近删除/设置
+        // 这些页面的标题很明确), 仍认不出 -> 看它是不是「被 present 出来的操作面板」。
+        // 三层判定叠加, 系统换私有类名也不会漏。
+        if (!ctx) ctx = MVBDetectNotesContext(self, nil);
         [[MVBManager shared] logClassOnce:name context:ctx ?: @"(未识别)"];
         // v1.2.0: 认不出类名时不再「直接放弃」。以前 return 掉 -> 只要类名清单漏了
         // 某个系统版本, 那个界面就整页毫无反应 (用户反馈「其他界面全都不生效」)。
-        // 现在: 只要这页「真的承载着列表/滚动容器」, 就按兜底语境 n_all 处理
-        // (n_all = 跟随七类界面里任意一个开关)。纯容器/辅助页仍然不动。
+        // v1.3.1: 兜底顺序改成「模态操作面板 -> 多多创新」优先于「有列表 -> n_all」。
+        // 「新建文件夹」这类面板本来就是被 present 出来的, 判成多多创新才对;
+        // 判成 n_all 会拿「根目录排序第一」那支素材, 看起来就像「显示的是首页的视频」。
         if (!ctx) {
-            if (!MVBViewHostsScrollable(self.view, 0)) return;
-            ctx = MVBContextAll;
+            if (MVBIsPresentedPanel(self)) ctx = MVBContextInnovate;
+            else if (MVBViewHostsScrollable(self.view, 0)) ctx = MVBContextAll;
+            else return;
         }
         // 只对「视图里真的承载着列表/滚动容器」的 VC 生效 —— 纯容器 VC 上插背景
         // 会被上层白底内容盖住, 白费功夫。
@@ -765,8 +800,11 @@ static char MVBDetectedCtxKey;
         // 但备忘录的文件夹页/笔记列表页, self.view 是普通容器 (真列表是子视图),
         // 于是被这条直接挡掉 -> 这些界面永远没背景。改为「子树里含有列表」即可,
         // 既能覆盖真实页面, 又不会给纯容器重复挂背景。
+        // v1.3.1: 首页/笔记/多多创新三者豁免 (前两者本来就在白名单, 操作面板常常
+        // 只是几个静态行, 没有滚动容器, 不能因此判它「不值得挂背景」)。
         if (![ctx isEqualToString:MVBContextHome] &&
             ![ctx isEqualToString:MVBContextNote] &&
+            ![ctx isEqualToString:MVBContextInnovate] &&
             ![self.view isKindOfClass:[UITableView class]] &&
             ![self.view isKindOfClass:[UICollectionView class]] &&
             !MVBViewHostsScrollable(self.view, 0)) return;
@@ -786,12 +824,15 @@ static char MVBDetectedCtxKey;
         if (MVBIsSystemClassName(name)) return;
         if ([name containsString:@"Keyboard"] || [name containsString:@"Picker"]) return;
         NSString *ctx = MVBContextForClassName(name);
+        if (!ctx) ctx = MVBDetectNotesContext(self, nil);          // v1.3.1: 标题兜底
         if (!ctx) {
-            if (!MVBViewHostsScrollable(self.view, 0)) return;
-            ctx = MVBContextAll;
+            if (MVBIsPresentedPanel(self)) ctx = MVBContextInnovate;  // v1.3.1: 模态面板
+            else if (MVBViewHostsScrollable(self.view, 0)) ctx = MVBContextAll;
+            else return;
         }
         if (![ctx isEqualToString:MVBContextHome] &&
             ![ctx isEqualToString:MVBContextNote] &&
+            ![ctx isEqualToString:MVBContextInnovate] &&
             !MVBViewHostsScrollable(self.view, 0)) return;
         MVBApplyPage(self, ctx);
     } @catch (NSException *e) {}

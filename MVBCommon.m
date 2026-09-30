@@ -531,7 +531,10 @@ BOOL MVBDirWritablePath(NSString *dir) {
 - (void)detachBackground:(MVBVideoBackgroundView *)bg fromViewController:(UIViewController *)vc;
 - (void)setSuspended:(BOOL)suspended forBackground:(MVBVideoBackgroundView *)bg;
 - (void)clearBackgroundsOfView:(UIView *)view depth:(NSInteger)depth;
-- (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx;
+// v1.3.1: 加 skip 参数 —— 扫「导航控制器视图」时要跳过已经扫过的 vc.view, 不重复劳动
+- (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx skip:(UIView *)skip;
+// v1.3.1: 摘掉「几乎铺满整页」的材质背板 (sheet 的整页模糊底)
+- (void)stripPageBackdropMaterialInView:(UIView *)view page:(UIView *)page depth:(NSInteger)depth;
 - (void)hideViewTemporarily:(UIView *)v;   // v1.7.9
 - (void)restoreViewAlpha:(UIView *)v;      // v1.7.9
 - (BOOL)subtreeContainsVideoBg:(UIView *)view depth:(NSInteger)depth; // v1.7.9
@@ -1519,6 +1522,106 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     } @catch (NSException *e) {}
 }
 
+// v1.3.1: 摘掉「整页级」的材质背板 —— 也就是那种铺满整个页面、用来做模糊底衬的
+// UIVisualEffectView (iOS 的一些操作面板/浮层整页就是一层 .systemMaterial 模糊)。
+// 为什么必须摘: ① 它会把我们的视频一起糊掉 —— 用户看到「视频模糊看不清」;
+//              ② 模糊会采样它背后的内容 —— 后面那一页的文件夹/文字会被糊着透出来,
+//                 用户看到「多多创新页里还能看到首页的文件夹」。
+// 只动「几乎铺满整页」的材质层 (>=95% 宽高), 卡片/小控件/局部模糊一律不碰。
+// 原始 effect 照惯例存起来, 便于「原样档」恢复。
+- (void)stripPageBackdropMaterialInView:(UIView *)view page:(UIView *)page depth:(NSInteger)depth {
+    if (!view || !page || depth > 3) return;
+    CGSize ps = page.bounds.size;
+    for (UIView *sub in [view.subviews copy]) {
+        if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) continue;
+        if ([sub isKindOfClass:[UIVisualEffectView class]]) {
+            CGSize s = sub.bounds.size;
+            if (ps.width > 1 && ps.height > 1 &&
+                s.width >= ps.width * 0.95 && s.height >= ps.height * 0.95) {
+                UIVisualEffectView *ev = (UIVisualEffectView *)sub;
+                if (!objc_getAssociatedObject(ev, &MVBOrigEffectKey) && ev.effect)
+                    objc_setAssociatedObject(ev, &MVBOrigEffectKey, ev.effect,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                ev.effect = nil;
+                ev.backgroundColor = [UIColor clearColor];
+                continue;
+            }
+        }
+        [self stripPageBackdropMaterialInView:sub page:page depth:depth + 1];
+    }
+}
+
+// v1.3.1: 系统 chrome 的透明化 (导航栏 / 导航项 / 底部工具栏 + 材质模糊层)。
+// 抽成方法是为了「延迟补扫时能再刷一遍」—— 系统 chrome 常常晚于 viewWillAppear
+// 才建好或才铺上材质, 只做一次会变成「第一次进是白的、退回来再进才透明」。
+- (void)refreshChromeForViewController:(UIViewController *)vc context:(NSString *)ctx {
+    if (!vc || !ctx.length) return;
+    @try {
+        // 整页材质背板 (sheet 模糊底) 也归这里管 —— 它同样可能晚一点才被系统铺上
+        [self stripPageBackdropMaterialInView:vc.view page:vc.view depth:0];
+    } @catch (NSException *e) {}
+    @try {
+        UINavigationController *nav = vc.navigationController;
+        if (nav.navigationBar &&
+            [nav.navigationBar respondsToSelector:@selector(setStandardAppearance:)]) {
+            UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
+            [ap configureWithTransparentBackground];
+            nav.navigationBar.standardAppearance   = ap;
+            nav.navigationBar.scrollEdgeAppearance = ap;
+            if ([nav.navigationBar respondsToSelector:@selector(setCompactAppearance:)])
+                nav.navigationBar.compactAppearance = ap;
+            // v1.3.1 关键: UINavigationItem 自己也能带一套 appearance, 而且**优先级高于
+            // bar 上那套**。备忘录的页面会给自己的 navigationItem 设不透明外观 ——
+            // 只在 bar 上设透明会被它整页盖掉, 用户看到的就是「顶部白条怎么都去不掉」。
+            // 所以 bar 和 item 两边都必须设。
+            UINavigationItem *item = vc.navigationItem;
+            if (item) {
+                item.standardAppearance   = ap;
+                item.scrollEdgeAppearance = ap;
+                if ([item respondsToSelector:@selector(setCompactAppearance:)])
+                    item.compactAppearance = ap;
+            }
+        }
+
+        // v1.7.1 底部工具栏: 系统材质白底, 不透明会挡住背景 —— 各种外观全部设透明。
+        // v1.3.1: 工具栏不一定在 vc.view 里 —— 通过 navigationController.toolbar 挂上去的
+        //         那个是**导航控制器视图**的子视图, 以前完全没被扫到 (「文件夹页底部白条」
+        //         就是这个)。三个来源一起收: vc.view / nav.toolbar / nav.view。
+        NSMutableArray<UIToolbar *> *bars = [NSMutableArray array];
+        MVBCollectToolbars(vc.view, bars, 0);
+        if (nav.toolbar) [bars addObject:nav.toolbar];
+        if (nav.view && nav.view != vc.view) MVBCollectToolbars(nav.view, bars, 0);
+        for (UIToolbar *tb in bars) {
+            UIToolbarAppearance *tap = [[UIToolbarAppearance alloc] init];
+            [tap configureWithTransparentBackground];
+            if ([tb respondsToSelector:@selector(setStandardAppearance:)])
+                tb.standardAppearance = tap;
+            SEL edgeSel = NSSelectorFromString(@"setScrollEdgeAppearance:");
+            if ([tb respondsToSelector:edgeSel])
+                ((void (*)(id, SEL, id))objc_msgSend)(tb, edgeSel, tap);
+            if ([tb respondsToSelector:@selector(setCompactAppearance:)])
+                tb.compactAppearance = tap;
+            tb.backgroundColor = [UIColor clearColor];
+        }
+    } @catch (NSException *e) {}
+
+    // 深度透明化: 顶栏/底栏/大标题等系统 chrome 的模糊层扫一遍。
+    // v1.3.1: 导航控制器的视图也要扫 —— 导航栏与 toolbar 都在它里面, 而它们
+    //         都不属于 vc.view; 以前只扫 vc.view + 「别的窗口」, 自己这个窗口里的
+    //         导航栏/工具栏材质完全没被碰过 (顶部白条的直接成因)。
+    @try {
+        [self deepChromePass:vc.view depth:0 ctx:ctx skip:nil];
+        UIView *navView = vc.navigationController.view;
+        if (navView && navView != vc.view)
+            [self deepChromePass:navView depth:0 ctx:ctx skip:vc.view];
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w == vc.view.window) continue;
+            if (navView && w == navView.window) continue;
+            [self deepChromePass:w depth:0 ctx:ctx skip:nil];
+        }
+    } @catch (NSException *e) {}
+}
+
 - (void)applyToViewController:(UIViewController *)vc context:(NSString *)ctx {
     @try {
         if (!vc.isViewLoaded || !vc.view) return;
@@ -1565,49 +1668,13 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             [self clearBackgroundsOfView:vc.view depth:0];
         }
 
-        // 导航栏滚动时会从透明(scrollEdge)切到不透明(standard)外观 -> 顶部白条。
-        // 背景生效期间两种外观都设为透明, 并保持住 (写在 apply 里, 每次出现都刷新)。
-        UINavigationController *nav = vc.navigationController;
-        if (nav.navigationBar &&
-            [nav.navigationBar respondsToSelector:@selector(setStandardAppearance:)]) {
-            UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
-            [ap configureWithTransparentBackground];
-            nav.navigationBar.standardAppearance  = ap;
-            nav.navigationBar.scrollEdgeAppearance = ap;
-        }
+        // v1.3.1: 摘掉整页材质背板 —— 它会把视频糊掉, 也会把后面那一页的内容糊着透出来。
+        // (pageSheet / 操作面板整页铺一层 systemMaterial 模糊就是这种)
+        [self stripPageBackdropMaterialInView:vc.view page:vc.view depth:0];
 
-        // v1.7.1 底部工具栏 (垃圾信息「全部已读/全部删除」、最近删除「全部删除/全部恢复」)
-        // 是系统材质白底, 不透明会挡住背景 —— 与导航栏同理, 各种外观全部设透明。
-        // 注意 scrollEdgeAppearance 是 iOS15 API, 14.5 SDK 无声明, 必须运行时调用。
-        @try {
-            NSMutableArray<UIToolbar *> *bars = [NSMutableArray array];
-            MVBCollectToolbars(vc.view, bars, 0);
-            for (UIToolbar *tb in bars) {
-                UIToolbarAppearance *tap = [[UIToolbarAppearance alloc] init];
-                [tap configureWithTransparentBackground];
-                if ([tb respondsToSelector:@selector(setStandardAppearance:)])
-                    tb.standardAppearance = tap;
-                SEL edgeSel = NSSelectorFromString(@"setScrollEdgeAppearance:");
-                if ([tb respondsToSelector:edgeSel])
-                    ((void (*)(id, SEL, id))objc_msgSend)(tb, edgeSel, tap);
-                if ([tb respondsToSelector:@selector(setCompactAppearance:)])
-                    tb.compactAppearance = tap;
-                tb.backgroundColor = [UIColor clearColor];
-            }
-        } @catch (NSException *e) {}
-
-        // 深度透明化: 顶栏/底栏/大标题等系统 chrome 的模糊层扫一遍。
-        // 输入条可能挂在窗口级容器 (docked inputAccessory), 所以 window 也扫一遍。
-        // 注: 备忘录没有「聊天气泡」概念, 信息版的气泡处理链路 (swizzleBalloonDrawing /
-        //     bubblePass) 在此**不接入** —— 那套逻辑是给信息 App 的 CKTextBalloonView 用的,
-        //     在笔记正文上跑只会误伤, 且默认档 (bubbleAlpha=1.0) 本就完全收手。
-        @try {
-            [self deepChromePass:vc.view depth:0 ctx:ctx];
-            for (UIWindow *w in UIApplication.sharedApplication.windows) {
-                if (w == vc.view.window) continue;
-                [self deepChromePass:w depth:0 ctx:ctx];
-            }
-        } @catch (NSException *e) {}
+        // 导航栏 / 导航项 / 底部工具栏全部透明化 + chrome 材质模糊层清扫。
+        // v1.3.1: 抽成 refreshChromeForVC —— 延迟补扫时还要再刷 (chrome 常晚于本方法才建好)。
+        [self refreshChromeForViewController:vc context:ctx];
 
         // 记录一次活动 (供诊断页判断 hook 是否真的触发)
         // v1.3.0: 这一页刚挂好背景 —— 立刻重算一遍可见性:
@@ -1712,9 +1779,10 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 // 底部操作栏的白雾是 UIVisualEffectView 材质模糊 (改外观拆不掉, 必须拆模糊层本身);
 // 对话详情顶部头像区/底部输入条是私有容器视图, 且输入条可能挂在窗口级容器
 // (docked inputAccessory) 而非 vc.view 内 —— 所以本方法也会对全部 window 扫。
-- (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx {
+- (void)deepChromePass:(UIView *)view depth:(NSInteger)depth ctx:(NSString *)ctx skip:(UIView *)skip {
     if (depth > 14) return;
     for (UIView *sub in view.subviews) {
+        if (sub == skip) continue;   // v1.3.1: 扫导航控制器视图时跳过已扫过的 vc.view
         if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) continue;
         NSString *cls = NSStringFromClass([sub class]);
         NSString *low = cls.lowercaseString;
@@ -1737,7 +1805,7 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                 if (origEff && !ev.effect) ev.effect = origEff;
             }
             [self restoreViewAlpha:sub];
-            [self deepChromePass:sub depth:depth + 1 ctx:ctx];
+            [self deepChromePass:sub depth:depth + 1 ctx:ctx skip:skip];
             continue;
         }
 
@@ -1768,7 +1836,7 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
             } else {
                 [self restoreViewAlpha:sub];
             }
-            [self deepChromePass:sub depth:depth + 1 ctx:ctx];
+            [self deepChromePass:sub depth:depth + 1 ctx:ctx skip:skip];
             continue;
         }
 
@@ -1801,7 +1869,7 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                 }
             }
         }
-        [self deepChromePass:sub depth:depth + 1 ctx:ctx];
+        [self deepChromePass:sub depth:depth + 1 ctx:ctx skip:skip];
     }
 }
 
@@ -2110,10 +2178,10 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
         UIViewController *host = MVBViewControllerForView(self);
         NSString *ctx = self.contextKey;
         if (host.isViewLoaded && host.view && ctx.length) {
-            [[MVBManager shared] deepChromePass:host.view depth:0 ctx:ctx];
+            [[MVBManager shared] deepChromePass:host.view depth:0 ctx:ctx skip:nil];
             for (UIWindow *w in UIApplication.sharedApplication.windows) {
                 if (w == host.view.window) continue;
-                [[MVBManager shared] deepChromePass:w depth:0 ctx:ctx];
+                [[MVBManager shared] deepChromePass:w depth:0 ctx:ctx skip:nil];
             }
         }
     } @catch (NSException *e) {}
@@ -2139,7 +2207,12 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
 - (instancetype)initWithFrame:(CGRect)frame contextKey:(NSString *)key {
     if ((self = [super initWithFrame:frame])) {
         _contextKey = [key copy];
-        self.backgroundColor = [UIColor clearColor];
+        // v1.3.1: 背景视图自带**不透明底衬**, 视频层作为它的子 layer 画在底衬之上。
+        // 为什么必须不透明: 页面被我们刷透明之后, 如果视频本身就是半透明的 (默认不透明度
+        // 0.65), 那么「后面那一页」的内容 (文件夹图标、标题文字、上一条笔记) 会直接透上来
+        // —— 用户看到的「多多创新页里还能看到首页的文件夹」「视频糊成一团看不清」
+        // 就是这个叠加结果。有了不透明底衬, 视频只会与这层底衬混合, 与后面的页面无关。
+        self.backgroundColor = [UIColor systemBackgroundColor];
         self.userInteractionEnabled = NO; // 不拦截触摸
         AVPlayerLayer *videoLayer = [AVPlayerLayer layer];
         videoLayer.frame = self.bounds;
@@ -2169,6 +2242,8 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
             self.videoLayer.filters = nil;
             return;
         }
+        // v1.3.1: 底衬保持不透明 (别的地方清底色时可能写过它)
+        self.backgroundColor = [UIColor systemBackgroundColor];
 
         AVPlayer *p = [mgr playerForContext:self.contextKey forceRebuild:NO];
         if (p && self.videoLayer.player != p) self.videoLayer.player = p;
