@@ -68,8 +68,10 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void) {
               @[MVBContextNote,     @"笔记",     @"点进某条笔记后的正文界面"],
               @[MVBContextSearch,   @"搜索一下", @"搜索框点进去后的搜索界面"],
               @[MVBContextRecent,   @"最近删除", @"最近删除列表"],
-              @[MVBContextInnovate, @"多多创新", @"新建文件夹/新建笔记的操作面板"],
-              @[MVBContextInner,    @"内部页",   @"更多设置等内部子页面"] ];
+              @[MVBContextInnovate, @"多多创新", @"新建文件夹/新建笔记的操作面板"] ];
+              // v1.3.2: 「内部页」并入了「笔记」(用户要求合并删项)。
+              // 内部页(设置/账户/更多/更多子页面)现在直接用「笔记」的素材与效果;
+              // 老配置里的 n_inner_* 键不再被读取, 不影响其它界面。
 }
 
 NSString *MVBJBMediaDirectory(void) {
@@ -926,7 +928,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
         (on && has) ? @"是✓" : @"否✗"];
     // v1.2.0: 七个界面开关一览 —— 一张截图就能分清「是开关没开」还是「清底没生效」
     @try {
-        NSArray<NSString *> *shortNames = @[@"首页", @"文件夹", @"笔记", @"搜索", @"最近", @"新建", @"内部"];
+        NSArray<NSString *> *shortNames = @[@"首页", @"文件夹", @"笔记", @"搜索", @"最近", @"新建"];
         NSArray<NSArray<NSString *> *> *defs = MVBContextDefinitions();
         NSMutableString *sw = [NSMutableString string];
         for (NSUInteger i = 0; i < defs.count; i++) {
@@ -1508,6 +1510,19 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     if (bg.suspended == suspended) return;
     bg.suspended = suspended;
     [bg configure];
+    // v1.3.2: 挂起/恢复时同步处理播放器, 否则「打开面板再退出, 主页变白」:
+    //   - 挂起(被盖住)时顺手暂停 —— 反正看不见, 还省电;
+    //   - 恢复(重新可见)时**强制重绑一次播放器**。被盖住期间 AVPlayerLayer 的显示内容
+    //     可能被系统回收 (purge), 光 play 不会重绘 —— 这是本项目早就实锤过的坑
+    //     (见 reconnectPlayerForce 注释)。不重绑的话, 回到主页看到的就是一片白。
+    @try {
+        AVPlayer *p = bg.videoLayer.player;
+        if (suspended) {
+            if (p && p.rate != 0.0) [p pause];
+        } else {
+            [bg reconnectPlayerForce:YES];   // 内部会先摘后挂 + play + 重套效果
+        }
+    } @catch (NSException *e) {}
 }
 
 // 重算「哪些页面的视频该显示」: 只让没被盖住的那个 VC 显示自己的视频。
@@ -1551,15 +1566,60 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
     }
 }
 
-// v1.3.1: 系统 chrome 的透明化 (导航栏 / 导航项 / 底部工具栏 + 材质模糊层)。
-// 抽成方法是为了「延迟补扫时能再刷一遍」—— 系统 chrome 常常晚于 viewWillAppear
-// 才建好或才铺上材质, 只做一次会变成「第一次进是白的、退回来再进才透明」。
-- (void)refreshChromeForViewController:(UIViewController *)vc context:(NSString *)ctx {
-    if (!vc || !ctx.length) return;
-    @try {
-        // 整页材质背板 (sheet 模糊底) 也归这里管 —— 它同样可能晚一点才被系统铺上
-        [self stripPageBackdropMaterialInView:vc.view page:vc.view depth:0];
-    } @catch (NSException *e) {}
+// v1.3.2: 「底部白条」兜底清扫 —— 不猜类名, 纯几何判定。
+// 备忘录「X 个备忘录」那条底栏不一定是标准 UIToolbar, appearance 那套对它无效。
+// 判据: 贴着容器底边 + 高 30~140 + 宽 >= 60% -> 按「底栏」处理: 只拆它的背景与材质,
+// 按钮/文字/输入框/列表一律不碰 (用户要求「透明化但保留按钮」)。
+// 只往深处找 3 层 —— 底栏属于 chrome, 都挂在容器靠外的位置, 再深就是页面内容了。
+static void MVBTransparentizeBar(UIView *v, NSInteger depth) {
+    if (!v || depth > 5) return;
+    if ([v isKindOfClass:[MVBVideoBackgroundView class]] ||
+        [v isKindOfClass:[UILabel class]]   || [v isKindOfClass:[UIButton class]] ||
+        [v isKindOfClass:[UIControl class]] || [v isKindOfClass:[UITextField class]]) return;
+    if ([v isKindOfClass:[UIVisualEffectView class]]) {
+        UIVisualEffectView *ev = (UIVisualEffectView *)v;
+        if (!objc_getAssociatedObject(ev, &MVBOrigEffectKey) && ev.effect)
+            objc_setAssociatedObject(ev, &MVBOrigEffectKey, ev.effect,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ev.effect = nil;
+        ev.backgroundColor = [UIColor clearColor];
+        return;
+    }
+    // v1.3.2: 进到这里时 v 就是被判定的那条底栏本身, 它自己的背景色同样要清
+    // (最初写成 depth > 0 才清 -> 整条底栏自己的白底被放过, 白条纹丝不动)。
+    // 上面已经把 UILabel/UIButton/UIControl/UITextField 挡掉了, 不会误伤按钮。
+    if (v.backgroundColor && ![v.backgroundColor isEqual:[UIColor clearColor]])
+        v.backgroundColor = [UIColor clearColor];
+    if (v.layer.backgroundColor) v.layer.backgroundColor = NULL;
+    if (v.opaque) v.opaque = NO;           // 不透明标记不清也会挡住背景
+    for (UIView *s in [v.subviews copy]) MVBTransparentizeBar(s, depth + 1);
+}
+
+static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger depth) {
+    if (!container || !view || depth > 3) return;
+    CGSize cs = container.bounds.size;
+    if (cs.width > 1 && cs.height > 1 && depth > 0) {
+        // v1.3.2: 必须用**换算到容器坐标系**的矩形来判 —— frame 是相对父视图的,
+        // 而这里要比的是「贴不贴容器底边」; 嵌套两层以上时直接拿 frame 比 bounds
+        // 得到的是坐标空间不一致的错误结果 (贴边的那条底栏会被判成不贴边)。
+        CGRect f = [view convertRect:view.bounds toView:container];
+        CGFloat h = f.size.height, w = f.size.width;
+        BOOL atBottom = (f.origin.y + f.size.height) >= cs.height - 2.0;
+        BOOL looksLikeBar = (h >= 30.0 && h <= 140.0 && w >= cs.width * 0.6 && atBottom);
+        BOOL isContent = [view isKindOfClass:[UITableView class]] ||
+                         [view isKindOfClass:[UICollectionView class]] ||
+                         [view isKindOfClass:[UIScrollView class]];
+        if (looksLikeBar && !isContent) MVBTransparentizeBar(view, 0);
+    }
+    for (UIView *s in [view.subviews copy]) MVBClearBottomBarsIn(container, s, depth + 1);
+}
+
+// v1.3.1: 系统 chrome 的透明化 (导航栏 / 导航项 / 底部工具栏)。
+// v1.3.2 拆成两层: 本方法只做「改外观 + 几何底栏」, **不拆材质、不藏视图** ——
+// 所以视频首帧还没到时调用它也不会闪白, 可以放在很早的节拍反复刷
+// (「内部页底部白条要等一会才透明」就是以前只能等 0.8s 的重材质那一拍)。
+- (void)refreshChromeAppearancesForViewController:(UIViewController *)vc {
+    if (!vc || !vc.isViewLoaded || !vc.view) return;
     @try {
         UINavigationController *nav = vc.navigationController;
         if (nav.navigationBar &&
@@ -1603,7 +1663,22 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
                 tb.compactAppearance = tap;
             tb.backgroundColor = [UIColor clearColor];
         }
+
+        // v1.3.2: 几何底栏兜底 (「X 个备忘录」那条不是标准 toolbar 也能被处理)
+        MVBClearBottomBarsIn(vc.view, vc.view, 0);
+        if (nav.view && nav.view != vc.view) MVBClearBottomBarsIn(nav.view, nav.view, 0);
     } @catch (NSException *e) {}
+}
+
+// v1.3.1: 完整版 chrome 透明化 = 外观层 (上面那个) + 材质模糊层清扫 + 整页背板。
+// 会拆材质/藏视图, 必须等视频首帧到位后再做, 否则会闪白 —— 放在偏后的节拍。
+- (void)refreshChromeForViewController:(UIViewController *)vc context:(NSString *)ctx {
+    if (!vc || !ctx.length) return;
+    @try {
+        // 整页材质背板 (sheet 模糊底) 也归这里管 —— 它同样可能晚一点才被系统铺上
+        [self stripPageBackdropMaterialInView:vc.view page:vc.view depth:0];
+    } @catch (NSException *e) {}
+    [self refreshChromeAppearancesForViewController:vc];
 
     // 深度透明化: 顶栏/底栏/大标题等系统 chrome 的模糊层扫一遍。
     // v1.3.1: 导航控制器的视图也要扫 —— 导航栏与 toolbar 都在它里面, 而它们

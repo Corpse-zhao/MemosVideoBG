@@ -121,15 +121,17 @@ static NSString *MVBContextForClassName(NSString *rawName) {
 
     // ③b v1.3.1: 内部页 (设置/账户/更多/关于/标签样式...) —— **必须排在「笔记」前面**。
     // 备忘录不少内部页的类名里也带 "Editor" (xxEditorSettingsController 之类),
-    // 而旧顺序先判 "Editor" 再判 "Settings" -> 这些页面全被判成「笔记」,
-    // 用户看到的就是「内部页跟笔记显示的是同一支视频」。
+    // 而旧顺序先判 "Editor" 再判 "Settings" -> 这些页面全被判成「笔记」以外的语境,
+    // 用户看到的就是「内部页跟笔记显示的不是同一支素材」。
+    // v1.3.2: 内部页已并入「笔记」(用户要求合并删项) —— 直接返回 n_note,
+    // 设置/账户/更多这类子页面与笔记共用同一套素材与效果。
     // 内部页天然带「设置/账户/更多/关于」这类词, 先判它们最稳。
     if ([name containsString:@"Settings"]   || [name containsString:@"Setting"] ||
         [name containsString:@"Preference"] || [name containsString:@"Account"] ||
         [name containsString:@"Debug"]      || [name containsString:@"About"] ||
         [name containsString:@"License"]    || [name containsString:@"Advanced"] ||
         [name containsString:@"Style"]      || [name containsString:@"More"])
-        return MVBContextInner;
+        return MVBContextNote;
 
     // ④ 笔记正文 (Body = 只读正文, Edit = 编辑) —— 必须放在 Folder 前面判,
     //    因为 ICNoteBodyViewController 不含 Folder, 但有些类名同时含 Note 与 Folder
@@ -222,9 +224,10 @@ static NSString *MVBDetectNotesContext(UIViewController *vc, NSString *fallback)
             if ([title containsString:@"新建"] || [title containsString:@"创建"] ||
                 [title localizedCaseInsensitiveContainsString:@"New"])
                 return MVBContextInnovate;
+            // v1.3.2: 内部页并入「笔记」
             if ([title containsString:@"设置"] || [title containsString:@"更多"] ||
                 [title localizedCaseInsensitiveContainsString:@"Settings"])
-                return MVBContextInner;
+                return MVBContextNote;
         }
 
         // 类名判别 (备注: 标题很多页面是空的, 类名才是主判据)
@@ -262,10 +265,13 @@ static void MVBRefreshBanner(NSString *ctx) {
 //   c) 白色改在「赋色源头」拦: UICollectionViewListCell 背景配置 setter + 默认外观
 //      重铺 (_updateDefaultBackgroundAppearance) + 分区背景装饰视图的
 //      setBackgroundColor: (系统每赋一次色就被改回透明)。
-// 总开关或主页面开关关闭时, 恢复所有被藏的卡片。
+// v1.3.2: 被藏的卡片**按页面归档** (挂在页面根视图上), 不再放全局数组。
+// 旧做法是全局一个数组 —— 「多多创新」面板自己的清扫若判定为不活跃, 会把
+// **首页**藏起来的白卡一并恢复, 用户看到的就是「打开创新一下再退出, 主页变白」。
+// 现在恢复只作用于「发起这次清扫的那个页面」, 页与页之间不再串。
 static char MVBOrigAlphaKey;
 static char MVBOrigHiddenKey;
-static NSMutableArray<UIView *> *MVBHiddenCards;
+static char MVBHostHiddenCardsKey;
 
 // 子树里有没有「必须可见」的内容 (文字/控件/输入框) —— 有就不能整体藏
 static BOOL MVBSubtreeHasContent(UIView *v, NSInteger depth) {
@@ -297,29 +303,44 @@ static BOOL MVBIsBigCard(UIView *v) {
     return YES;
 }
 
-static void MVBRecordHideCard(UIView *v) {
-    if (!v || v.hidden) return;
-    if (!MVBHiddenCards) MVBHiddenCards = [NSMutableArray new];
+static NSMutableArray<UIView *> *MVBHiddenCardsForHost(UIView *host, BOOL create) {
+    if (!host) return nil;
+    NSMutableArray<UIView *> *arr = objc_getAssociatedObject(host, &MVBHostHiddenCardsKey);
+    if (!arr && create) {
+        arr = [NSMutableArray new];
+        objc_setAssociatedObject(host, &MVBHostHiddenCardsKey, arr,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return arr;
+}
+
+static void MVBRecordHideCard(UIView *host, UIView *v) {
+    if (!host || !v || v.hidden) return;
+    NSMutableArray<UIView *> *arr = MVBHiddenCardsForHost(host, YES);
     // 清理已脱离视图树的旧记录, 防数组随滚动膨胀
-    NSIndexSet *dead = [MVBHiddenCards indexesOfObjectsPassingTest:
+    NSIndexSet *dead = [arr indexesOfObjectsPassingTest:
         ^BOOL(UIView *h, NSUInteger i, BOOL *stop) { return h.superview == nil; }];
-    if (dead.count) [MVBHiddenCards removeObjectsAtIndexes:dead];
+    if (dead.count) [arr removeObjectsAtIndexes:dead];
     if (objc_getAssociatedObject(v, &MVBOrigAlphaKey)) { v.hidden = YES; return; }
     objc_setAssociatedObject(v, &MVBOrigAlphaKey, @(v.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(v, &MVBOrigHiddenKey, @(v.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [MVBHiddenCards addObject:v];
+    [arr addObject:v];
     v.hidden = YES;
 }
 
-static void MVBRestoreHiddenCards(void) {
-    if (!MVBHiddenCards.count) return;
-    for (UIView *v in [MVBHiddenCards copy]) {
+// 恢复「host 这一页」自己藏掉的卡片 (v1.3.2: 不再跨页面恢复)
+static void MVBRestoreHiddenCards(UIView *host) {
+    NSMutableArray<UIView *> *arr = MVBHiddenCardsForHost(host, NO);
+    if (!arr.count) return;
+    for (UIView *v in [arr copy]) {
         NSNumber *a = objc_getAssociatedObject(v, &MVBOrigAlphaKey);
         NSNumber *h = objc_getAssociatedObject(v, &MVBOrigHiddenKey);
         if (a) v.alpha = a.doubleValue;
         if (h) v.hidden = h.boolValue;
     }
-    [MVBHiddenCards removeAllObjects];
+    [arr removeAllObjects];
+    objc_setAssociatedObject(host, &MVBHostHiddenCardsKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // v1.2.0: 清扫按「当前界面自己的开关」判定。
@@ -344,13 +365,15 @@ static BOOL MVBMainSweepActive(void) {
     return MVBSweepActiveForContext([[MVBManager shared] currentContext]);
 }
 
-static void MVBClearContainerBGs(UIView *v, NSInteger depth, NSString *ctx, BOOL hideCards) {
-    if (!v || depth > 14) return;
+static void MVBClearContainerBGs(UIView *host, UIView *v, NSInteger depth,
+                                 NSString *ctx, BOOL hideCards) {
+    if (!host || !v || depth > 14) return;
     if ([v isKindOfClass:[MVBVideoBackgroundView class]]) return;
     // v1.3.0: 「本界面该不该清」只在最外层判一次。原来每层都判, 而每次判定要读配置 +
     // 列素材目录 (同步 IO) —— 一页几百个节点就是几百次 IO, 是「卡一下」的主要来源。
     // ctx 在整棵树里是常量, 结果必然相同。
-    if (depth == 0 && !MVBSweepActiveForContext(ctx)) { MVBRestoreHiddenCards(); return; }
+    // v1.3.2: host = 发起清扫的页面根视图 —— 被藏卡片的恢复只作用于它自己这一页。
+    if (depth == 0 && !MVBSweepActiveForContext(ctx)) { MVBRestoreHiddenCards(host); return; }
     // v1.7.21: cell 的系统托管背景子树整体跳过 (不藏不清)。v1.7.20 曾藏
     // backgroundView/selectedBackgroundView + layoutSubviews 持续重扫, 与系统的
     // backgroundConfiguration 重应用撞车 —— 点选单元格时 SIGABRT (崩溃日志实锤:
@@ -377,10 +400,10 @@ static void MVBClearContainerBGs(UIView *v, NSInteger depth, NSString *ctx, BOOL
     // v1.7.20: 大面积无内容的白卡/模糊卡/背景图 -> 整体藏掉 (文字图标小控件不动)
     // v1.2.0: 「藏大白卡」只在首页启用 —— 那是首页分组卡片的专用对策,
     //         在笔记正文/文件夹等页面误伤风险高, 这些页面只做底色透明化。
-    if (hideCards && MVBIsBigCard(v)) MVBRecordHideCard(v);
+    if (hideCards && MVBIsBigCard(v)) MVBRecordHideCard(host, v);
     for (UIView *s in v.subviews) {
         if (s == cellBg || s == cellSelBg) continue;   // 托管背景子树不碰
-        MVBClearContainerBGs(s, depth + 1, ctx, hideCards);
+        MVBClearContainerBGs(host, s, depth + 1, ctx, hideCards);
     }
 }
 
@@ -392,7 +415,7 @@ static void MVBSweepPage(UIView *v, NSString *ctx, BOOL hideCards) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (sMVBLastSweepAt > 0 && now - sMVBLastSweepAt < 0.12) return;
     sMVBLastSweepAt = now;
-    MVBClearContainerBGs(v, 0, ctx, hideCards);
+    MVBClearContainerBGs(v, v, 0, ctx, hideCards);
 }
 
 // v1.3.0: 「当前页的视频出画面了没有」。
@@ -453,8 +476,14 @@ static void MVBApplyPage(UIViewController *vc, NSString *ctx) {
                 [[MVBManager shared] refreshCoveredBackgrounds];
                 // v1.3.1: 系统 chrome (导航栏/导航项/底部工具栏/材质背板) 常常晚于
                 // viewWillAppear 才建好或才铺上材质, 只在 apply 里做一次会「看运气」。
-                // 在偏后的节拍重刷: 顺便消掉「第一次进是白条、退回来再进才透明」。
-                // 只在 0.8s 之后刷 —— 更早的节拍视频首帧还没到, 提前拆材质/藏内容会闪白。
+                // v1.3.2: 拆成两层 ——
+                //   · refreshChromeAppearancesForViewController: 只改外观/Transparency,
+                //     不拆材质不藏视图, 首帧没到也**不会闪白**, 所以**每一拍都刷**。
+                //     原来只在 0.8s 之后刷 -> 用户看到的「底部白条要等一会才透明」
+                //     就是这里等出来的。
+                //   · refreshChromeForViewController:context: 会 strip 整页材质 + 深扫,
+                //     早做会闪白, 仍留在偏后的节拍。
+                [[MVBManager shared] refreshChromeAppearancesForViewController:s];
                 if (i == 4 || i == 5 || i == 7)
                     [[MVBManager shared] refreshChromeForViewController:s context:ctxCopy];
                 if (force) {

@@ -23,7 +23,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define MVB_VERSION @"1.3.1"
+#define MVB_VERSION @"1.3.2"
 #define MVB_SUITE @"com.nvb.memosvideobg"
 #define MVB_DARWIN_NOTE "com.nvb.memosvideobg/prefs.changed"
 #define MVB_MEDIA_DIR_NAME @"MemosVideoBG"
@@ -153,6 +153,9 @@ NSArray<NSArray<NSString *> *> *MVBContextDefinitions(void);
 // 系统 chrome 往往晚于 viewWillAppear 才建好/才铺色, 所以延迟补扫时也要再刷一遍,
 // 否则会出现「第一次进是白的、退回再进才透明」这种看运气的结果。
 - (void)refreshChromeForViewController:(UIViewController *)vc context:(NSString *)ctx;
+// v1.3.2: 轻量版 —— 只改 appearance + 几何底栏, 不拆材质不藏视图,
+// 因此视频首帧未到位时调用也不会闪白, 可以在很早的节拍反复刷新 (修「底部白条延迟」)。
+- (void)refreshChromeAppearancesForViewController:(UIViewController *)vc;
 
 #pragma mark 前后台自愈
 - (void)handleAppEnterBackground;
