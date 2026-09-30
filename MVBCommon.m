@@ -1787,13 +1787,10 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         [self attachBackground:bg toViewController:vc];
         [bg configure];
 
-        // v1.3.7: 切页面闪白根因 —— 等视频就绪那 0.25s 内整页保持默认色 (深色=黑, 浅色=白)。
-        // 现在拆成两步:
-        // ① 页面背景**立刻**设成透明 —— 背景视图自带不透明底衬, 不会透到系统窗口,
-        //    用户看到的是「视频未出的底色」(深色模式=黑底, 浅色=白底), 不再闪白;
-        // ② 等视频就绪后再做 clearBackgroundsOfView (清卡片), 视频与底色混合显示。
-        // 极端情况 (视频解码 > 0.25s): 用户看到底色 0.25s, 然后切到视频, 比闪白好。
-        vc.view.backgroundColor = [UIColor clearColor];
+        // v1.3.9: 不要清 vc.view.backgroundColor —— 它保持默认 systemBackgroundColor,
+        // 与背景视图的底色一致, 切页面瞬间看起来「没动」, 视频就绪后自然覆盖。
+        // 清卡片背景 (clearBackgroundsOfView) 留给视频就绪后, 否则卡片透明→露出
+        // 底色 (浅色=白底, 深色=深底) → 用户看到「视频没出时的白/深色一闪」。
         BOOL ready = bg.videoLayer.isReadyForDisplay;
         if (!ready) {
             for (int n = 0; n < 16 && !bg.videoLayer.isReadyForDisplay; n++) {
