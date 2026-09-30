@@ -118,10 +118,18 @@ NSString *MVBFindAppDataContainer(NSString *bundleId) {
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:meta];
         if ([d[@"MCMMetadataIdentifier"] isEqualToString:bundleId]) return dir;
     }
-    // 2) 兜底: 目录内含 Library/SMS 特征 (苹果「信息」数据)
+    // 2) 兜底: 元数据读不到时, 按「备忘录数据特征目录」猜。
+    //    苹果备忘录的数据根在 Library/Notes (旧版叫 Library/Notes/...),
+    //    部分 iOS 版本还能看到 Library/Group Containers 下的 group.com.apple.notes。
     for (NSString *dir in dirs) {
-        if ([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Library/SMS"]])
-            return dir;
+        NSString *lib = [dir stringByAppendingPathComponent:@"Library"];
+        if ([fm fileExistsAtPath:[lib stringByAppendingPathComponent:@"Notes"]]) return dir;
+        if ([fm fileExistsAtPath:[lib stringByAppendingPathComponent:@"Group Containers"]]) {
+            NSString *gc = [lib stringByAppendingPathComponent:@"Group Containers"];
+            NSArray *subs = [fm contentsOfDirectoryAtPath:gc error:nil];
+            for (NSString *g in subs)
+                if ([g containsString:@"apple.notes"]) return dir;
+        }
     }
     return nil;
 }
@@ -163,7 +171,7 @@ NSArray<NSString *> *MVBRootCandidates(void) {
 
     NSString *primary = nil;
     if (MVBIsControlApp()) {
-        NSString *c = MVBFindAppDataContainer(MVB_SMS_BUNDLE_ID);
+        NSString *c = MVBFindAppDataContainer(MVB_NOTES_BUNDLE_ID);
         if (c.length)
             primary = [[c stringByAppendingPathComponent:@"Library"]
                        stringByAppendingPathComponent:MVB_MEDIA_DIR_NAME];
@@ -827,7 +835,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
     }
 
     NSString *bid = MVBHostBundleIdentifier();
-    NSString *host = [bid isEqualToString:MVB_SMS_BUNDLE_ID] ? @"备忘录App"
+    NSString *host = [bid isEqualToString:MVB_NOTES_BUNDLE_ID] ? @"备忘录App"
                    : ([bid isEqualToString:MVB_APP_BUNDLE_ID] ? @"控制App"
                    : (bid.length ? bid : @"未知进程"));
     NSMutableString *s = [NSMutableString string];
@@ -883,7 +891,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
 
         // v1.3: 备忘录App 数据容器定位 + 跨容器写入探针
         [r appendString:@"\n--- 备忘录App 数据容器 (v1.3 主素材根) ---\n"];
-        NSString *c = MVBFindAppDataContainer(MVB_SMS_BUNDLE_ID);
+        NSString *c = MVBFindAppDataContainer(MVB_NOTES_BUNDLE_ID);
         if (!c.length) {
             [r appendString:@"未定位到 com.apple.mobilenotes 数据容器 ❌\n"];
             [r appendString:@"  -> 控制App 无法把素材直送备忘录App 容器, 只能靠共享根。\n"];
@@ -2202,7 +2210,7 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
 - (void)scheduleBackgroundKill {
     @try {
         // 只在真正的宿主「信息」里做 (绝不误杀 SpringBoard 等)
-        if (![MVBHostBundleIdentifier() isEqualToString:MVB_SMS_BUNDLE_ID]) return;
+        if (![MVBHostBundleIdentifier() isEqualToString:MVB_NOTES_BUNDLE_ID]) return;
         [self cancelScheduledBackgroundKill];
         int64_t gen = ++sMVBKillGeneration;
         NSTimeInterval delay = self.bgKillDelay;

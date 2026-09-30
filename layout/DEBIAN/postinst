@@ -89,7 +89,7 @@ fi
   echo "jbroot: $(readlink -f /var/jb 2>/dev/null)"
   D=/var/jb/Library/MobileSubstrate/DynamicLibraries
   [ -f "$D/MemosVideoBG.dylib" ] && echo "dylib: OK $(stat -c%s "$D/MemosVideoBG.dylib" 2>/dev/null) bytes" || echo "dylib: MISSING"
-  echo "SMS container: ${NOTES_C:-NOT-FOUND}"
+  echo "Notes container: ${NOTES_C:-NOT-FOUND}"
   echo "friendly path: $(readlink "$FRIENDLY_LINK" 2>/dev/null || echo '(未建/是真目录)')"
 } >> "$LOG" 2>&1
 chmod 644 "$LOG" 2>/dev/null
