@@ -455,6 +455,7 @@ static BOOL MVBDirWritable(NSString *dir) {
 static char MVBBGKey;
 static char MVBAppliedCtxKey;   // v1.7.19: 每个 VC 实际挂载的语境 (离开时精确暂停对应播放器)
 static char MVBOrigEffectKey;         // v1.7.13: 原始 UIVisualEffectView.effect (原样档恢复材质)
+static char MVBBubbleOrigAlphaKey;   // v1.7.9: 视图被临时隐藏前的原 alpha (hideViewTemporarily/restoreViewAlpha 的存档位)
 static NSString *MVBLastHeartbeatTag = nil;
 
 // 从视图向上找宿主 VC (chrome 节流补扫需要)
@@ -490,6 +491,7 @@ BOOL MVBDirWritablePath(NSString *dir) {
 - (void)hideViewTemporarily:(UIView *)v;   // v1.7.9
 - (void)restoreViewAlpha:(UIView *)v;      // v1.7.9
 - (BOOL)subtreeContainsVideoBg:(UIView *)view depth:(NSInteger)depth; // v1.7.9
+- (void)refreshVisibleBackgrounds;
 - (void)refreshInView:(UIView *)view;
 - (void)playerDidEnd:(NSNotification *)n;
 - (void)collectVideoViewsIn:(UIView *)view into:(NSMutableArray *)out;
@@ -1550,42 +1552,79 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
         // 键盘整棵子树跳过 (拆键盘模糊会毁掉键盘观感)
         if ([low containsString:@"keyboard"]) continue;
         if (depth <= 3) [self logClassOnce:cls context:ctx];
-        // v1.7.14: 聊天页「原样」档 (ba>=0.999) = 看消息模式, 页面内部完全收手
-        // (透明化只作用于透明/隐藏档), 杜绝一切对原样外观的干扰
-        BOOL originMode = [ctx isEqualToString:MVBContextNote] &&
-                          [self bubbleAlphaForContext:ctx] >= 0.999;
-        // 材质模糊层: 底部栏/输入条的白雾就是它 -> 直接拆。
-        // v1.7.13: 先缓存原始 effect; **聊天页「原样」档不拆** —— iOS16 的 backdrop 特效
-        // 视图被拆成 nil 后会渲染成纯黑块 (用户截图实锤: 原样档气泡=黑块+隐约文字),
-        // 原样=看消息模式, 材质恢复原样; 透明/隐藏档才拆。
+
+        CGFloat ba = [self bubbleAlphaForContext:ctx];
+        // 「原样」档 (ba>=0.999) = 完全不透明模式, 页面内部收手, 只让材质保持原状。
+        // 透明/隐藏档才拆材质、清底色。
+        BOOL originMode = (ba >= 0.999);
+
+        // v1.7.14: 备忘录页「原样」档 = 阅读模式, 页面内部完全收手。
+        // 所有语境统一: ba>=0.999 就不动内部外观。
+        if (originMode) {
+            // 原样档: 若之前拆过材质, 尝试恢复; 其余一律不碰。
+            if ([sub isKindOfClass:[UIVisualEffectView class]]) {
+                UIVisualEffectView *ev = (UIVisualEffectView *)sub;
+                id origEff = objc_getAssociatedObject(ev, &MVBOrigEffectKey);
+                if (origEff && !ev.effect) ev.effect = origEff;
+            }
+            [self restoreViewAlpha:sub];
+            [self deepChromePass:sub depth:depth + 1 ctx:ctx];
+            continue;
+        }
+
+        // 系统托管的 cell 背景视图只藏不清 —— 直接清底色会干扰系统的
+        // backgroundConfiguration 重应用流程, 已实锤导致 UICollectionView 崩溃。
+        BOOL sysBg = [sub isKindOfClass:[UITableViewCell class]] ||
+                     [sub isKindOfClass:[UICollectionViewCell class]];
+        UIView *pv = sub.superview;
+        if ([pv isKindOfClass:[UICollectionViewCell class]]) {
+            UICollectionViewCell *pc = (UICollectionViewCell *)pv;
+            if ((pc.backgroundView && sub == pc.backgroundView) ||
+                (pc.selectedBackgroundView && sub == pc.selectedBackgroundView)) sysBg = YES;
+        }
+
+        // 材质模糊层: 底部栏/搜索条/导航条的白雾就是它 -> 透明/隐藏档直接拆。
+        // 先缓存原始 effect, 便于原样档恢复。
         if ([sub isKindOfClass:[UIVisualEffectView class]]) {
             UIVisualEffectView *ev = (UIVisualEffectView *)sub;
             id origEff = objc_getAssociatedObject(ev, &MVBOrigEffectKey);
             if (!origEff && ev.effect) {
                 objc_setAssociatedObject(ev, &MVBOrigEffectKey, ev.effect,
                                          OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                origEff = ev.effect;
             }
-            BOOL restoreNow = [ctx isEqualToString:MVBContextNote] &&
-                              [self bubbleAlphaForContext:ctx] >= 0.999;
-            if (restoreNow) {
-                if (origEff && !ev.effect) ev.effect = origEff;
+            ev.effect = nil;
+            // 隐藏档连视图一起藏 (暗色材质块会挡视频)
+            if (ba <= 0.06 && !sysBg && ![self subtreeContainsVideoBg:sub depth:0]) {
+                [self hideViewTemporarily:sub];
             } else {
-                ev.effect = nil;
+                [self restoreViewAlpha:sub];
             }
+            [self deepChromePass:sub depth:depth + 1 ctx:ctx];
             continue;
         }
-        if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UIButton class]]) {
-            // 文字/按钮不动
-        } else if (!originMode) {
-            // chrome 容器关键词命中即清背景 (工具栏/输入条/头部/抽屉/导航等); 原样档不碰
-            BOOL chrome = [low containsString:@"toolbar"] || [low containsString:@"input"] ||
-                          [low containsString:@"header"] || [low containsString:@"navbar"] ||
-                          [low containsString:@"navigationbar"] || [low containsString:@"drawer"] ||
-                          [low containsString:@"bottombar"] || [low containsString:@"accessory"] ||
-                          [low containsString:@"avatar"] || [low containsString:@"contact"] ||
-                          [low containsString:@"statusbar"];
-            if (chrome) {
+
+        // 隐藏档 (ba<=0.06): 子树里没有视频背景视图的一律整体 alpha=0,
+        // 拉高滑条时 restoreViewAlpha 全部恢复。文字/按钮/输入框豁免。
+        if (ba <= 0.06 && !sysBg &&
+            ![sub isKindOfClass:[UILabel class]] &&
+            ![sub isKindOfClass:[UIButton class]] &&
+            ![sub isKindOfClass:[UIControl class]] &&
+            ![sub isKindOfClass:[UITextField class]] &&
+            ![self subtreeContainsVideoBg:sub depth:0]) {
+            [self hideViewTemporarily:sub];
+        } else if ([sub isKindOfClass:[UILabel class]] || [sub isKindOfClass:[UIButton class]]) {
+            // 文字/按钮不动 (但可能之前被藏过, 恢复)
+            [self restoreViewAlpha:sub];
+        } else {
+            [self restoreViewAlpha:sub];
+            // chrome 容器关键词命中即清背景 (工具栏/搜索条/头部/抽屉/导航等)
+            BOOL chrome = [low containsString:@"toolbar"] || [low containsString:@"searchbar"] ||
+                          [low containsString:@"input"] || [low containsString:@"header"] ||
+                          [low containsString:@"navbar"] || [low containsString:@"navigationbar"] ||
+                          [low containsString:@"drawer"] || [low containsString:@"bottombar"] ||
+                          [low containsString:@"accessory"] || [low containsString:@"statusbar"] ||
+                          [low containsString:@"separator"];
+            if (chrome && !sysBg) {
                 sub.backgroundColor = [UIColor clearColor];
                 if ([sub respondsToSelector:@selector(contentView)]) {
                     UIView *cv = ((UIView *(*)(id, SEL))objc_msgSend)(sub, @selector(contentView));
@@ -1691,6 +1730,54 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
         for (UIWindow *w in UIApplication.sharedApplication.windows) [self collectVideoViewsIn:w into:out];
     } @catch (NSException *e) {}
     return out;
+}
+
+// v1.7.9: 彻底隐藏视图 —— 缓存原 alpha 后置 0 (连 drawRect 自绘内容一起消失)。
+- (void)hideViewTemporarily:(UIView *)v {
+    NSNumber *orig = objc_getAssociatedObject(v, &MVBBubbleOrigAlphaKey);
+    if (!orig) {
+        orig = @(v.alpha);
+        objc_setAssociatedObject(v, &MVBBubbleOrigAlphaKey, orig,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    v.alpha = 0.0;
+}
+
+// v1.7.9: 从隐藏档拉回来时恢复原 alpha。
+- (void)restoreViewAlpha:(UIView *)v {
+    NSNumber *orig = objc_getAssociatedObject(v, &MVBBubbleOrigAlphaKey);
+    if (orig && v.alpha <= 0.001 && [orig doubleValue] > 0.001) {
+        v.alpha = [orig doubleValue];
+    }
+}
+
+// v1.7.9: 安全阀 —— 视频背景视图若在某容器子树里, 该容器绝不能整体隐藏 (会把视频也藏了)。
+- (BOOL)subtreeContainsVideoBg:(UIView *)view depth:(NSInteger)depth {
+    if (depth > 8) return NO;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) return YES;
+        if ([self subtreeContainsVideoBg:sub depth:depth + 1]) return YES;
+    }
+    return NO;
+}
+
+// 素材热刷新看门狗发现变化后, 遍历所有窗口让每个视频背景视图重新 configure。
+- (void)refreshVisibleBackgrounds {
+    @try {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes.allObjects) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) [self refreshInView:w];
+        }
+        for (UIWindow *w in UIApplication.sharedApplication.windows) [self refreshInView:w];
+    } @catch (NSException *e) {}
+}
+
+- (void)refreshInView:(UIView *)view {
+    if ([view isKindOfClass:[MVBVideoBackgroundView class]]) {
+        [(MVBVideoBackgroundView *)view configure];
+        return;
+    }
+    for (UIView *sub in view.subviews) [self refreshInView:sub];
 }
 
 - (void)pauseAllPlayers {
