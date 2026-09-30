@@ -636,6 +636,16 @@ static char MVBDetectedCtxKey;
 
 // ---------- ① 首页: 文件夹列表 (I C F o l d e r L i s t) ----------
 %hook ICFolderListViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图 —— 让 iOS 转场 snapshot 包含 bg (bg 视图
+    // 底色深灰, 即便 videoLayer 未就绪, snapshot 也不会被识别为「闪白」)。
+    objc_setAssociatedObject(self, &MVBDetectedCtxKey, MVBContextHome,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:MVBContextHome];
+    MVB_APPLY_CTX(self, MVBContextHome)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -671,6 +681,16 @@ static char MVBDetectedCtxKey;
 
 // ---------- ② 文件夹: 某文件夹内的笔记列表 ----------
 %hook ICFolderViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图 (同首页)
+    NSString *ctx = MVBDetectNotesContext(self, MVBContextFolder);
+    objc_setAssociatedObject(self, &MVBDetectedCtxKey, ctx,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
+    MVB_APPLY_CTX(self, ctx)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -714,6 +734,19 @@ static char MVBDetectedCtxKey;
 
 // ---------- ③ 笔记列表 (部分机型/版本) ----------
 %hook ICNoteListViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图
+    NSString *ctx = MVBContextFolder;
+    if (MVBViewHasAnyTitle(self, @[@"最近删除", @"Recently Deleted"]))       ctx = MVBContextRecent;
+    else if (MVBViewHasAnyTitle(self, @[@"搜索", @"Search"]))               ctx = MVBContextSearch;
+    else if (MVBViewHasAnyTitle(self, @[@"新建文件夹", @"New Folder"]))      ctx = MVBContextInnovate;
+    objc_setAssociatedObject(self, &MVBDetectedCtxKey, ctx,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:ctx];
+    MVB_APPLY_CTX(self, ctx)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -738,6 +771,13 @@ static char MVBDetectedCtxKey;
 
 // ---------- ④ 笔记正文 (只读) ----------
 %hook ICNoteBodyViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:MVBContextNote];
+    MVB_SAFE_APPLY(MVBContextNote)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -759,6 +799,13 @@ static char MVBDetectedCtxKey;
 
 // ---------- ⑤ 笔记编辑 ----------
 %hook ICNoteEditViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:MVBContextNote];
+    MVB_SAFE_APPLY(MVBContextNote)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -780,6 +827,13 @@ static char MVBDetectedCtxKey;
 
 // ---------- ⑥ 搜索一下 ----------
 %hook ICSearchViewController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:MVBContextSearch];
+    MVB_SAFE_APPLY(MVBContextSearch)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()
@@ -796,6 +850,13 @@ static char MVBDetectedCtxKey;
 
 // ---------- ⑦ 多多创新: 新建文件夹等操作面板 ----------
 %hook ICFolderCreationController
+- (void)viewDidLoad {
+    %orig;
+    MVB_NOTES_GUARD()
+    // v1.3.10: viewDidLoad 提前挂 bg 视图
+    [[MVBManager shared] logClassOnce:NSStringFromClass([self class]) context:MVBContextInnovate];
+    MVB_SAFE_APPLY(MVBContextInnovate)
+}
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     MVB_NOTES_GUARD()

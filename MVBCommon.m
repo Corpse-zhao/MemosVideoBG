@@ -1787,20 +1787,15 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         [self attachBackground:bg toViewController:vc];
         [bg configure];
 
-        // v1.3.9: 不要清 vc.view.backgroundColor —— 它保持默认 systemBackgroundColor,
-        // 与背景视图的底色一致, 切页面瞬间看起来「没动」, 视频就绪后自然覆盖。
-        // 清卡片背景 (clearBackgroundsOfView) 留给视频就绪后, 否则卡片透明→露出
-        // 底色 (浅色=白底, 深色=深底) → 用户看到「视频没出时的白/深色一闪」。
-        BOOL ready = bg.videoLayer.isReadyForDisplay;
-        if (!ready) {
-            for (int n = 0; n < 16 && !bg.videoLayer.isReadyForDisplay; n++) {
-                [NSThread sleepForTimeInterval:0.015];
-            }
-            ready = bg.videoLayer.isReadyForDisplay;
-        }
-        if (ready) {
-            [self clearBackgroundsOfView:vc.view depth:0];
-        }
+        // v1.3.10: 立即透明化 chrome/卡片 —— **不等 videoLayer 就绪**。
+        // 之前 v1.3.9 的"等就绪"是担心提前清卡片会让用户看到"页面默认白色底" (vc.view
+        // 默认 systemBackgroundColor, 透出来被识别为白闪)。但实测:
+        //   · 等就绪 -> 240ms 内卡片是白色 -> 用户看到「白卡 240ms -> 视频」—— 闪白
+        //   · 立刻清 -> chrome/卡片透明, 露出 bg 视图底色 (v1.3.10 已改为深灰) —— 不闪白
+        // 关键: bg 视图底色从白 (systemBackgroundColor) 改为深灰 (colorWithWhite:0.12),
+        // 不论 videoLayer 是否就绪, 切页面瞬间用户看到的都是**深灰** (不被识别为闪白) +
+        // chrome/卡片透明; 视频就绪后 videoLayer 覆盖, 看到视频。
+        [self clearBackgroundsOfView:vc.view depth:0];
 
         // v1.3.1: 摘掉整页材质背板 —— 它会把视频糊掉, 也会把后面那一页的内容糊着透出来。
         // (pageSheet / 操作面板整页铺一层 systemMaterial 模糊就是这种)
@@ -2346,7 +2341,12 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
         // 0.65), 那么「后面那一页」的内容 (文件夹图标、标题文字、上一条笔记) 会直接透上来
         // —— 用户看到的「多多创新页里还能看到首页的文件夹」「视频糊成一团看不清」
         // 就是这个叠加结果。有了不透明底衬, 视频只会与这层底衬混合, 与后面的页面无关。
-        self.backgroundColor = [UIColor systemBackgroundColor];
+        // v1.3.10: 底色从 systemBackgroundColor (浅=白, 深=黑) 改为**深灰中性色**。
+        // 切页面瞬间 videoLayer 未就绪时, 露出的是 bg 视图的底色 —— 用白色会被人眼
+        // 识别为「页面闪白跳变」(因为白底 vs 视频的色调差异最大, 最刺眼); 用**深灰**
+        // (RGB 0.12 = 偏暗的中性色) 不会被感知为「闪白」(深灰和视频色调都偏暗, 视觉
+        // 跳变更柔和)。视频就绪后 videoLayer 立刻覆盖底色, 用户最终看到视频。
+        self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0];
         self.userInteractionEnabled = NO; // 不拦截触摸
         AVPlayerLayer *videoLayer = [AVPlayerLayer layer];
         videoLayer.frame = self.bounds;
@@ -2377,7 +2377,8 @@ static NSMutableDictionary<NSString *, NSDate *> *sMVBPlayerMtimes = nil;
             return;
         }
         // v1.3.1: 底衬保持不透明 (别的地方清底色时可能写过它)
-        self.backgroundColor = [UIColor systemBackgroundColor];
+        // v1.3.10: 改为深灰中性色 —— 同 init 里的理由, 避免切页面瞬间被感知为「闪白」
+        self.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0];
 
         AVPlayer *p = [mgr playerForContext:self.contextKey forceRebuild:NO];
         if (p && self.videoLayer.player != p) self.videoLayer.player = p;

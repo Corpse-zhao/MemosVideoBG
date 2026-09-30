@@ -23,7 +23,7 @@
 //   同时保留 jbroot / Documents 等共享根作为兜底, 用户放哪都能被扫到。
 // ============================================================
 
-#define MVB_VERSION @"1.3.9"
+#define MVB_VERSION @"1.3.10"
 #define MVB_SUITE @"com.nvb.memosvideobg"
 #define MVB_DARWIN_NOTE "com.nvb.memosvideobg/prefs.changed"
 #define MVB_MEDIA_DIR_NAME @"MemosVideoBG"
