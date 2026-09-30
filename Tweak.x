@@ -307,6 +307,13 @@ static void MVBScheduleMainPageCheck(UIViewController *vc) {
     });
 }
 
+// Darwin 通知回调: 控制App 改了配置 -> 实时让所有视频背景视图重新 configure。
+// (CFNotificationCenterAddObserver 要求一个 C 函数指针, 不能直接传消息表达式)
+static void MVBPrefsChanged(CFNotificationCenterRef center, void *observer,
+                            CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    [[MVBManager shared] refreshVisibleBackgrounds];
+}
+
 
 #pragma mark - 备忘录 App Hook
 
