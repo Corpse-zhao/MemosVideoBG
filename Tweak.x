@@ -864,6 +864,17 @@ static char MVBDetectedCtxKey;
             ![ctx isEqualToString:MVBContextInnovate] &&
             !MVBViewHostsScrollable(self.view, 0)) return;
         MVBApplyPage(self, ctx);
+        // v1.3.4: 页面真正出现 (动画结束 + 视图稳态) 时再算一次「谁被盖住」并重连播放器。
+        // setSuspended:NO 内部会 reconnectPlayerForce, 解决「退出面板后主页一片白 /
+        // 视频不见」(setSuspended 之前算的 covered 可能还是 YES)。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                [[MVBManager shared] refreshCoveredBackgrounds];
+                NSString *applied = [[MVBManager shared] appliedContextForViewController:self];
+                if (applied.length) [[MVBManager shared] setContextActive:YES context:applied];
+            } @catch (NSException *e) {}
+        });
     } @catch (NSException *e) {}
 }
 // 只走兜底路径的页面离开时也要暂停自己的播放器, 防声音穿透到其它界面。

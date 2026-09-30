@@ -1545,7 +1545,7 @@ static void MVBCollectToolbars(UIView *view, NSMutableArray<UIToolbar *> *out_, 
 // 只动「几乎铺满整页」的材质层 (>=95% 宽高), 卡片/小控件/局部模糊一律不碰。
 // 原始 effect 照惯例存起来, 便于「原样档」恢复。
 - (void)stripPageBackdropMaterialInView:(UIView *)view page:(UIView *)page depth:(NSInteger)depth {
-    if (!view || !page || depth > 3) return;
+    if (!view || !page || depth > 8) return;
     CGSize ps = page.bounds.size;
     for (UIView *sub in [view.subviews copy]) {
         if ([sub isKindOfClass:[MVBVideoBackgroundView class]]) continue;
@@ -1596,7 +1596,7 @@ static void MVBTransparentizeBar(UIView *v, NSInteger depth) {
 }
 
 static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger depth) {
-    if (!container || !view || depth > 3) return;
+    if (!container || !view || depth > 6) return;
     CGSize cs = container.bounds.size;
     if (cs.width > 1 && cs.height > 1 && depth > 0) {
         // v1.3.2: 必须用**换算到容器坐标系**的矩形来判 —— frame 是相对父视图的,
