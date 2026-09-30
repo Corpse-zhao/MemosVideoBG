@@ -6,13 +6,20 @@ export ARCHS = arm64
 include $(THEOS)/makefiles/common.mk
 
 # ------------------------------------------------------------
-# 签名密钥: 与主插件共用同一 GitHub Secret (MVB_LICENSE_SECRET)。
-# 两边密钥一致, 签发的激活码才能被插件识别。
+# 签名密钥 (v2.4.0: 两个插件统一)
+#   与主插件、信息版共用同一个 GitHub Secret (VIDEOBG_LICENSE_SECRET)。
+#   三边密钥一致 + 指纹算法一致, 签出的码才能被插件识别;
+#   具体给哪个插件用, 由授权串里的「产品位」决定 (通用 / 仅信息 / 仅备忘)。
+#   兼容旧名: 新名没配时自动回退读 MVB_LICENSE_SECRET。
 # ------------------------------------------------------------
-ifeq ($(strip $(MVB_LICENSE_SECRET)),)
-MVB_LICENSE_SECRET = MVBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+LICENSE_SECRET_RAW = $(VIDEOBG_LICENSE_SECRET)
+ifeq ($(strip $(LICENSE_SECRET_RAW)),)
+LICENSE_SECRET_RAW = $(MVB_LICENSE_SECRET)
 endif
-KEYGEN_CFLAGS = -DMVB_LICENSE_SECRET='"$(MVB_LICENSE_SECRET)"'
+ifeq ($(strip $(LICENSE_SECRET_RAW)),)
+LICENSE_SECRET_RAW = VIDEOBG-LICENSE-FALLBACK-INSECURE-SET-CI-SECRET
+endif
+KEYGEN_CFLAGS = -DVIDEOBG_LICENSE_SECRET='"$(LICENSE_SECRET_RAW)"'
 
 APPLICATION_NAME = MVBKeyGen
 MVBKeyGen_FILES = main.m KGAppDelegate.m KGAuth.m
