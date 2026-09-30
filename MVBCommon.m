@@ -1602,9 +1602,14 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         // v1.3.2: 必须用**换算到容器坐标系**的矩形来判 —— frame 是相对父视图的,
         // 而这里要比的是「贴不贴容器底边」; 嵌套两层以上时直接拿 frame 比 bounds
         // 得到的是坐标空间不一致的错误结果 (贴边的那条底栏会被判成不贴边)。
+        // v1.3.3: iOS 16 上 nav.view 的「X 个备忘录」底栏是放在 safeAreaInsets.bottom
+        // 之上的, maxY 实际是 cs.height - 34 左右。原来的阈值 2pt 太紧, 这条底栏
+        // 会被漏判。现在用 60pt (覆盖 home indicator 34pt + 一些缓冲区); 同时保留
+        // 严格的「绝对贴底」分支, 把真正贴 cs.height 边的那类 (工具栏/状态条) 也命中。
         CGRect f = [view convertRect:view.bounds toView:container];
         CGFloat h = f.size.height, w = f.size.width;
-        BOOL atBottom = (f.origin.y + f.size.height) >= cs.height - 2.0;
+        CGFloat maxY = f.origin.y + f.size.height;
+        BOOL atBottom = (maxY >= cs.height - 60.0);
         BOOL looksLikeBar = (h >= 30.0 && h <= 140.0 && w >= cs.width * 0.6 && atBottom);
         BOOL isContent = [view isKindOfClass:[UITableView class]] ||
                          [view isKindOfClass:[UICollectionView class]] ||
