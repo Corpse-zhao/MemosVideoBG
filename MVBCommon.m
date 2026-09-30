@@ -1787,14 +1787,23 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         [self attachBackground:bg toViewController:vc];
         [bg configure];
 
-        // v1.3.6: 切页面闪白的根因 —— 原来「isReadyForDisplay 才清底」的写法,
-        // 视频首帧没解码完时整页保持默认白色, 切换瞬间肉眼可见一道白闪。
-        // 现在**无条件**立刻把页面背景清成透明 + 整页清扫:
-        // ① 视频没好的时候, 背景视图 (MVBVideoBackgroundView) 自带的不透明底衬
-        //    会盖住后面那一页的内容, 用户看到的只是「底色 + 视频未出」, 不再闪白;
-        // ② 视频好了之后, 半透明视频与底衬混合 —— 视觉一致。
-        vc.view.backgroundColor = [UIColor clearColor];
-        [self clearBackgroundsOfView:vc.view depth:0];
+        // v1.3.0: 清底 (把整页刷透明) 必须等视频首帧**已解码**才能做。
+        // 先刷透明、视频却还在准备 -> 中间露出的就是系统窗口底色 (浅色模式=白, 深色=黑),
+        // 用户看到的闪白/黑闪就是这个。
+        // v1.3.7: 用「等最多 0.25s」的短超时代替原来的硬守卫 —— 视频解码通常 < 100ms,
+        // 极个别慢的也强制兜底, 不再让页面保持白底超过 0.25s。
+        BOOL ready = bg.videoLayer.isReadyForDisplay;
+        if (!ready) {
+            // 等一帧 (16ms) 再看, 给解码一个机会; 累计等 0.25s 仍没好就强制清
+            for (int n = 0; n < 16 && !bg.videoLayer.isReadyForDisplay; n++) {
+                [NSThread sleepForTimeInterval:0.015];
+            }
+            ready = bg.videoLayer.isReadyForDisplay;
+        }
+        if (ready || bg.path) {   // bg.path 非空 = 视频文件已挂上, 解码失败也不该透
+            vc.view.backgroundColor = [UIColor clearColor];
+            [self clearBackgroundsOfView:vc.view depth:0];
+        }
 
         // v1.3.1: 摘掉整页材质背板 —— 它会把视频糊掉, 也会把后面那一页的内容糊着透出来。
         // (pageSheet / 操作面板整页铺一层 systemMaterial 模糊就是这种)

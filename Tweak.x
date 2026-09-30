@@ -109,7 +109,13 @@ static NSString *MVBContextForClassName(NSString *rawName) {
     if (!notesish) return nil;
 
     // ① 最近删除 (优先级最高 —— 类名里含 RecentlyDeleted 的都在这里)
-    if ([name containsString:@"RecentlyDeleted"]) return MVBContextRecent;
+    // v1.3.7: 兼容新写法 (iOS 16 备忘录某些版本上把 RecentlyDeleted 拆成
+    // ICRecentlyDeletedViewController / ICTrashFolderViewController 这类, 类名
+    // 不再含 "RecentlyDeleted"); 增补 "Trash"/"Deleted"/"Recycle" 关键词。
+    if ([name containsString:@"RecentlyDeleted"] || [name containsString:@"RecentlyDeletedNote"] ||
+        [name containsString:@"Trash"]          || [name containsString:@"Deleted"] ||
+        [name containsString:@"Recycle"])
+        return MVBContextRecent;
 
     // ② 搜索 (搜索页与其结果列表)
     if ([name containsString:@"Search"]) return MVBContextSearch;
@@ -141,6 +147,15 @@ static NSString *MVBContextForClassName(NSString *rawName) {
 
     // ⑤ 文件夹列表 (首页) —— 必须放在「文件夹」前面判
     if ([name containsString:@"FolderList"]) return MVBContextHome;
+
+    // ⑤b v1.3.7: iOS 16 备忘录用了 split-view 容器 (iPhone 上有时也用),
+    // 真实根 VC 是 ICTrailingSidebarSplitViewController / ICSplitViewController 这类,
+    // 上面再挂一个 ICFolderListViewController (子 VC), 但父 VC 没认出来 → 整页
+    // 落到 n_all 兜底, 没有 n_all 素材 → 卡片盖住视频 → 用户看到纯黑/闪白。
+    // 把任何「带 Sidebar / Split / Outline 字段」的容器都按首页认, 让子 VC 自己细化。
+    if ([name containsString:@"Sidebar"]   || [name containsString:@"SplitView"] ||
+        [name containsString:@"Outline"]   || [name containsString:@"Trailing"])
+        return MVBContextHome;
 
     // ⑥ 单个文件夹内的笔记列表
     if ([name containsString:@"Folder"] ||
