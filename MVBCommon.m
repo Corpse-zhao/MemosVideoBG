@@ -1800,7 +1800,7 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
             }
             ready = bg.videoLayer.isReadyForDisplay;
         }
-        if (ready || bg.path) {   // bg.path 非空 = 视频文件已挂上, 解码失败也不该透
+        if (ready) {
             vc.view.backgroundColor = [UIColor clearColor];
             [self clearBackgroundsOfView:vc.view depth:0];
         }
