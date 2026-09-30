@@ -1635,7 +1635,7 @@ static void MVBTransparentizeBar(UIView *v, NSInteger depth) {
 }
 
 static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger depth) {
-    if (!container || !view || depth > 6) return;
+    if (!container || !view || depth > 8) return;
     CGSize cs = container.bounds.size;
     if (cs.width > 1 && cs.height > 1 && depth > 0) {
         // v1.3.2: 必须用**换算到容器坐标系**的矩形来判 —— frame 是相对父视图的,
@@ -1711,6 +1711,15 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         // v1.3.2: 几何底栏兜底 (「X 个备忘录」那条不是标准 toolbar 也能被处理)
         MVBClearBottomBarsIn(vc.view, vc.view, 0);
         if (nav.view && nav.view != vc.view) MVBClearBottomBarsIn(nav.view, nav.view, 0);
+
+        // v1.3.6: 暴力摘材质从完整版搬到轻量版 —— 修「整页雾蒙蒙」间歇出现
+        // 原先只在 0.8s/1.4s/5.0s 后拍调, 进页面前 0.45s 材质糊住整页;
+        // 现在每一拍都调 (effect=nil 是无害操作, 不会闪白)。
+        @try {
+            MVBAggressiveStripMaterialsIn(vc.view, 0);
+            UIView *navView = vc.navigationController.view;
+            if (navView && navView != vc.view) MVBAggressiveStripMaterialsIn(navView, 0);
+        } @catch (NSException *e) {}
     } @catch (NSException *e) {}
 }
 
@@ -1724,14 +1733,7 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
     } @catch (NSException *e) {}
     [self refreshChromeAppearancesForViewController:vc];
 
-    // v1.3.5: 「暴力摘材质」扫尾 —— 修最近删除/搜索结果这种 systemUltraThinMaterial
-    // 嵌套在私有 wrapper 中, stripPageBackdropMaterial 阈值放低到 50% 也未必全命中的场景。
-    // 只动页面背景类的 (vc.view + nav.view), 不动 toolbar/navBar 子树 (由 appearance 处理)。
-    @try {
-        MVBAggressiveStripMaterialsIn(vc.view, 0);
-        UIView *navView = vc.navigationController.view;
-        if (navView && navView != vc.view) MVBAggressiveStripMaterialsIn(navView, 0);
-    } @catch (NSException *e) {}
+    // v1.3.6: 暴力摘材质已搬到轻量版 (每一拍都跑), 这里不再重复调。
 
     // 深度透明化: 顶栏/底栏/大标题等系统 chrome 的模糊层扫一遍。
     // v1.3.1: 导航控制器的视图也要扫 —— 导航栏与 toolbar 都在它里面, 而它们
@@ -1785,16 +1787,14 @@ static void MVBClearBottomBarsIn(UIView *container, UIView *view, NSInteger dept
         [self attachBackground:bg toViewController:vc];
         [bg configure];
 
-        // v1.3.0: 清底 (把整页刷透明) 必须等视频首帧**已解码**才能做。
-        // 先刷透明、视频却还在准备 -> 中间露出的就是系统窗口白底, 用户看到的就是
-        // 「刚点进备忘录卡一下白一下」。没就绪时这里先不清, 交给 Tweak 侧的多段延迟
-        // 补扫在首帧到达后补做 (那套清得更彻底); 0.8s 后仍没就绪也会强制清底兜底。
-        // 注意: 导航栏/工具栏透明化、chrome 拆材质这些照旧做 —— 它们背后仍是本页
-        // 自己的不透明内容, 看不出差别, 不影响首帧观感。
-        if (bg.videoLayer.isReadyForDisplay) {
-            vc.view.backgroundColor = [UIColor clearColor];
-            [self clearBackgroundsOfView:vc.view depth:0];
-        }
+        // v1.3.6: 切页面闪白的根因 —— 原来「isReadyForDisplay 才清底」的写法,
+        // 视频首帧没解码完时整页保持默认白色, 切换瞬间肉眼可见一道白闪。
+        // 现在**无条件**立刻把页面背景清成透明 + 整页清扫:
+        // ① 视频没好的时候, 背景视图 (MVBVideoBackgroundView) 自带的不透明底衬
+        //    会盖住后面那一页的内容, 用户看到的只是「底色 + 视频未出」, 不再闪白;
+        // ② 视频好了之后, 半透明视频与底衬混合 —— 视觉一致。
+        vc.view.backgroundColor = [UIColor clearColor];
+        [self clearBackgroundsOfView:vc.view depth:0];
 
         // v1.3.1: 摘掉整页材质背板 —— 它会把视频糊掉, 也会把后面那一页的内容糊着透出来。
         // (pageSheet / 操作面板整页铺一层 systemMaterial 模糊就是这种)
